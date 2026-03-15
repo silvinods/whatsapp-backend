@@ -1,143 +1,89 @@
-const express = require("express");
-const cors = require("cors");
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const qrcode = require("qrcode");
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const express = require('express');
+const cors = require('cors');
+const qrcode = require('qrcode');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-let client = null;
-let qrBase64 = null;
-let status = "offline";
-
-let respostas = {
-  oi: "Olá! Este é um atendimento automático.",
-  menu: "Menu:\n1 - Horário\n2 - Suporte\n3 - Atendente"
-};
-
-// =======================
-// INICIAR BOT
-// =======================
+let client;
+let currentQR = null;
+let botReady = false;
 
 function startBot() {
 
-  if (client) return;
+    if (client) return;
 
-  client = new Client({
-    authStrategy: new LocalAuth()
-  });
+    client = new Client({
+        authStrategy: new LocalAuth(),
+        puppeteer: {
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        }
+    });
 
-  client.on("qr", async (qr) => {
+    client.on('qr', async (qr) => {
+        currentQR = await qrcode.toDataURL(qr);
+        console.log("QR gerado");
+    });
 
-    console.log("QR recebido");
+    client.on('ready', () => {
+        botReady = true;
+        console.log("Bot pronto");
+    });
 
-    qrBase64 = await qrcode.toDataURL(qr);
-    status = "qr";
+    client.on('message', async (message) => {
 
-  });
+        if (message.from.includes('@g.us')) return;
 
-  client.on("ready", () => {
+        const texto = message.body.toLowerCase();
 
-    console.log("Bot online");
+        if (texto === 'oi') {
+            message.reply('Olá! Atendimento automático.');
+        }
 
-    status = "online";
+        if (texto === 'menu') {
+            message.reply(
+                'Menu:\n1 - Horário\n2 - Suporte\n3 - Atendente'
+            );
+        }
 
-  });
+    });
 
-  client.on("disconnected", () => {
-
-    console.log("Bot desconectado");
-
-    status = "offline";
-    client = null;
-
-  });
-
-  client.on("message", (msg) => {
-
-    // ignorar grupos
-    if (msg.from.includes("@g.us")) return;
-
-    const texto = msg.body.toLowerCase();
-
-    if (respostas[texto]) {
-      msg.reply(respostas[texto]);
-    }
-
-  });
-
-  client.initialize();
+    client.initialize();
 }
 
-// =======================
-// PARAR BOT
-// =======================
 
-function stopBot() {
-
-  if (client) {
-
-    client.destroy();
-    client = null;
-    status = "offline";
-
-  }
-
-}
-
-// =======================
-// API
-// =======================
-
-app.get("/", (req, res) => {
-  res.send("Backend rodando");
+// iniciar bot
+app.get('/start', (req, res) => {
+    startBot();
+    res.send("Bot iniciado");
 });
 
-app.get("/status", (req, res) => {
-  res.json({ status });
+
+// status
+app.get('/status', (req, res) => {
+    res.json({
+        ready: botReady
+    });
 });
 
-app.get("/qr", (req, res) => {
-  res.json({ qr: qrBase64 });
+
+// qr
+app.get('/qr', (req, res) => {
+    res.json({
+        qr: currentQR
+    });
 });
 
-app.get("/start", (req, res) => {
 
-  startBot();
-
-  res.json({ ok: true });
-
+app.get('/', (req, res) => {
+    res.send("Backend rodando");
 });
 
-app.get("/stop", (req, res) => {
-
-  stopBot();
-
-  res.json({ ok: true });
-
-});
-
-app.get("/respostas", (req, res) => {
-  res.json(respostas);
-});
-
-app.post("/respostas", (req, res) => {
-
-  respostas = req.body;
-
-  res.json({ ok: true });
-
-});
-
-// =======================
-// PORTA PARA RAILWAY
-// =======================
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-
-  console.log("Servidor rodando");
-
+    console.log("Servidor rodando");
 });

@@ -1,9 +1,8 @@
 {
-  "name": "whatsapp-backend",
+  "name": "bot-simples",
   "version": "1.0.0",
-  "description": "Bot WhatsApp backend",
+  "description": "Bot WhatsApp simples com Baileys",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
@@ -11,10 +10,10 @@
     "node": "18.x"
   },
   "dependencies": {
-    "cors": "^2.8.6",
+    "@whiskeysockets/baileys": "^6.5.0",
+    "qrcode-terminal": "^0.12.0",
     "express": "^5.2.1",
-    "puppeteer": "^21.11.0",
-    "qrcode": "^1.5.4",
-    "whatsapp-web.js": "^1.34.6"
+    "cors": "^2.8.6",
+    "qrcode": "^1.5.4"
   }
 }

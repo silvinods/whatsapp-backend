@@ -1,147 +1,93 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
+const qrcodeTerminal = require('qrcode-terminal');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-let client = null;
+let sock = null;
 let currentQR = null;
 let botReady = false;
-let starting = false;
-let restartTimer = null;
 
-function startBot() {
-    if (client || starting) return;
-    starting = true;
-    botReady = false;
-    currentQR = null;
-
-    console.log('🚀 Iniciando bot...');
-
-    if (restartTimer) {
-        clearTimeout(restartTimer);
-        restartTimer = null;
-    }
-
-    client = new Client({
-        authStrategy: new LocalAuth(),
-        puppeteer: {
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--no-zygote',
-                '--single-process'
-            ]
-        }
+async function connectWhatsApp() {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    
+    sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false, // vamos gerar QR via código
+        browser: ['Bot Simples', 'Chrome', '1.0.0']
     });
 
-    client.on('qr', async (qr) => {
-        console.log('📲 QR Code gerado. Acesse /qr para escanear.');
-        try {
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+            console.log('QR recebido, gerando imagem...');
             currentQR = await qrcode.toDataURL(qr);
-        } catch (err) {
-            console.error('Erro ao gerar QR:', err);
+            qrcodeTerminal.generate(qr, { small: true }); // opcional, aparece no log
+        }
+        
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('Conexão fechada, reconectando?', shouldReconnect);
+            botReady = false;
+            currentQR = null;
+            if (shouldReconnect) connectWhatsApp();
+        } else if (connection === 'open') {
+            console.log('✅ Bot conectado!');
+            botReady = true;
+            currentQR = null;
         }
     });
 
-    client.on('ready', () => {
-        console.log('✅ Bot pronto e conectado!');
-        botReady = true;
-        currentQR = null;
-        starting = false;
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
+        if (msg.key.remoteJid.endsWith('@g.us')) return; // ignora grupos
+
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+        const from = msg.key.remoteJid;
+
+        if (text.toLowerCase() === 'oi') {
+            await sock.sendMessage(from, { text: 'Olá! Atendimento automático.' });
+        }
+        if (text.toLowerCase() === 'menu') {
+            await sock.sendMessage(from, { text: '1 - Suporte\n2 - Horários' });
+        }
     });
 
-    client.on('authenticated', () => {
-        console.log('🔐 Autenticado com sucesso!');
-    });
-
-    client.on('auth_failure', (msg) => {
-        console.error('❌ Falha na autenticação:', msg);
-        botReady = false;
-        starting = false;
-        client = null;
-        scheduleRestart();
-    });
-
-    client.on('disconnected', (reason) => {
-        console.log('⚠️ Cliente desconectado:', reason);
-        botReady = false;
-        starting = false;
-        client = null;
-        scheduleRestart();
-    });
-
-    client.on('message', async (msg) => {
-        if (msg.from.includes('@g.us')) return;
-        const texto = msg.body.toLowerCase();
-        if (texto === 'oi') msg.reply('Olá! Atendimento automático Silvino.');
-        if (texto === 'menu') msg.reply('1 - Suporte\n2 - Horários');
-    });
-
-    client.initialize().catch((err) => {
-        console.error('💥 Erro crítico na inicialização:', err);
-        botReady = false;
-        starting = false;
-        client = null;
-        scheduleRestart();
-    });
+    sock.ev.on('creds.update', saveCreds);
 }
 
-function scheduleRestart() {
-    if (restartTimer) return;
-    const delay = 30000;
-    console.log(`⏳ Reiniciando o bot em ${delay / 1000} segundos...`);
-    restartTimer = setTimeout(() => {
-        restartTimer = null;
-        startBot();
-    }, delay);
-}
-
+// Rotas
 app.get('/status', (req, res) => {
-    res.json({ ready: botReady, qr: !!currentQR, starting });
+    res.json({ ready: botReady, qr: !!currentQR });
 });
 
 app.get('/qr', (req, res) => {
     if (currentQR) {
         res.send(`<html>
-            <head><meta charset="UTF-8"></head>
-            <body style="background:#000;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
-                <div style="background:#fff;padding:20px;border-radius:10px;text-align:center;font-family:sans-serif;">
+            <body style="background:#000;display:flex;justify-content:center;align-items:center;height:100vh;">
+                <div style="background:#fff;padding:20px;border-radius:10px;">
                     <h2>Escaneie o QR Code</h2>
-                    <img src="${currentQR}" style="width:300px;height:300px;" alt="QR Code">
-                    <p>O QR Code expira rápido, escaneie logo!</p>
+                    <img src="${currentQR}" style="width:300px;">
                 </div>
             </body>
         </html>`);
     } else {
-        res.status(404).send('QR Code ainda não gerado. Aguarde e atualize a página.');
+        res.send('QR Code não gerado ainda. Aguarde...');
     }
-});
-
-app.post('/restart', (req, res) => {
-    if (client) {
-        client.destroy().catch(() => {});
-        client = null;
-    }
-    botReady = false;
-    currentQR = null;
-    starting = false;
-    startBot();
-    res.json({ message: 'Reinicialização solicitada.' });
 });
 
 app.get('/', (req, res) => {
-    res.send('Servidor Silvino Soares Ativo. Acesse /status para ver o estado.');
+    res.send('Bot Simples - Acesse /qr para escanear');
 });
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Servidor rodando na porta ${PORT}`);
-    startBot();
+    console.log(`Servidor rodando na porta ${PORT}`);
+    connectWhatsApp();
 });

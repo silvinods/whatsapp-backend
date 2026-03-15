@@ -2,7 +2,6 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
-const qrcodeTerminal = require('qrcode-terminal');
 
 const app = express();
 app.use(cors());
@@ -13,11 +12,12 @@ let currentQR = null;
 let botReady = false;
 
 async function connectWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    console.log('Iniciando conexão WhatsApp...');
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info'); // pasta local
     
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, // vamos gerar QR via código
+        printQRInTerminal: false, // vamos exibir via rota
         browser: ['Bot Simples', 'Chrome', '1.0.0']
     });
 
@@ -26,20 +26,29 @@ async function connectWhatsApp() {
         
         if (qr) {
             console.log('QR recebido, gerando imagem...');
-            currentQR = await qrcode.toDataURL(qr);
-            qrcodeTerminal.generate(qr, { small: true }); // opcional, aparece no log
+            try {
+                currentQR = await qrcode.toDataURL(qr);
+            } catch (err) {
+                console.error('Erro ao gerar QR:', err);
+            }
         }
         
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Conexão fechada, reconectando?', shouldReconnect);
+            console.log('Conexão fechada, reconectar?', shouldReconnect);
             botReady = false;
             currentQR = null;
-            if (shouldReconnect) connectWhatsApp();
+            if (shouldReconnect) {
+                console.log('Tentando reconectar...');
+                connectWhatsApp();
+            } else {
+                console.log('Deslogado permanentemente, aguardando novo QR...');
+                // Se deslogou, mantém sock = null e QR será gerado na nova conexão
+            }
         } else if (connection === 'open') {
             console.log('✅ Bot conectado!');
             botReady = true;
-            currentQR = null;
+            currentQR = null; // limpa QR após conectar
         }
     });
 
@@ -70,20 +79,21 @@ app.get('/status', (req, res) => {
 app.get('/qr', (req, res) => {
     if (currentQR) {
         res.send(`<html>
-            <body style="background:#000;display:flex;justify-content:center;align-items:center;height:100vh;">
-                <div style="background:#fff;padding:20px;border-radius:10px;">
+            <head><meta charset="UTF-8"></head>
+            <body style="background:#000;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
+                <div style="background:#fff;padding:20px;border-radius:10px;text-align:center;">
                     <h2>Escaneie o QR Code</h2>
-                    <img src="${currentQR}" style="width:300px;">
+                    <img src="${currentQR}" style="width:300px;height:300px;" alt="QR Code">
                 </div>
             </body>
         </html>`);
     } else {
-        res.send('QR Code não gerado ainda. Aguarde...');
+        res.status(404).send('QR Code não gerado ainda. Aguarde e tente novamente.');
     }
 });
 
 app.get('/', (req, res) => {
-    res.send('Bot Simples - Acesse /qr para escanear');
+    res.send('Bot Simples - Acesse /qr para escanear ou /status para ver o estado.');
 });
 
 const PORT = process.env.PORT || 8080;

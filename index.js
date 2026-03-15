@@ -26,7 +26,6 @@ function startBot() {
         restartTimer = null;
     }
 
-    // Cliente WhatsApp com configuração simplificada
     client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: {
@@ -79,7 +78,7 @@ function startBot() {
     });
 
     client.on('message', async (msg) => {
-        if (msg.from.includes('@g.us')) return; // ignora grupos
+        if (msg.from.includes('@g.us')) return;
         const texto = msg.body.toLowerCase();
         if (texto === 'oi') msg.reply('Olá! Atendimento automático Silvino.');
         if (texto === 'menu') msg.reply('1 - Suporte\n2 - Horários');
@@ -96,7 +95,7 @@ function startBot() {
 
 function scheduleRestart() {
     if (restartTimer) return;
-    const delay = 30000; // 30 segundos
+    const delay = 30000;
     console.log(`⏳ Reiniciando o bot em ${delay / 1000} segundos...`);
     restartTimer = setTimeout(() => {
         restartTimer = null;
@@ -104,13 +103,8 @@ function scheduleRestart() {
     }, delay);
 }
 
-// Rotas
 app.get('/status', (req, res) => {
-    res.json({
-        ready: botReady,
-        qr: !!currentQR,
-        starting
-    });
+    res.json({ ready: botReady, qr: !!currentQR, starting });
 });
 
 app.get('/qr', (req, res) => {

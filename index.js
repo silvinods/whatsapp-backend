@@ -77,7 +77,7 @@ function startBot() {
     });
 
     client.on('ready', () => {
-        console.log('✅ Bot pronto e conectado!');
+        console.log('✅ Bot pronto e conectado! EEE');
         botReady = true;
         currentQR = null;
         starting = false;

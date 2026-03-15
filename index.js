@@ -2,6 +2,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
@@ -13,99 +14,74 @@ let botReady = false;
 let starting = false;
 
 function startBot() {
-    if (client || starting) {
-        console.log("Bot já está em processo de inicialização ou rodando.");
-        return;
-    }
-
+    if (client || starting) return;
     starting = true;
-    console.log("Iniciando Puppeteer... Aguarde, isso pode levar até 1 minuto no Railway.");
+
+    console.log("--- INICIANDO BOT SILVINO ---");
+
+    // Tenta encontrar o Google Chrome nos caminhos comuns do Railway/Linux
+    const paths = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium-browser'];
+    const executablePath = paths.find(path => fs.existsSync(path));
+
+    console.log(executablePath ? `Caminho do Chrome encontrado: ${executablePath}` : "Chrome não encontrado, tentando padrão...");
 
     client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: {
             headless: true,
-            // Importante: Usa a variável que configuramos no painel do Railway
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+            executablePath: executablePath || undefined,
             args: [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-accelerated-2d-canvas",
-                "--no-first-run",
+                "--disable-gpu",
                 "--no-zygote",
-                "--single-process",
-                "--disable-gpu"
+                "--single-process"
             ]
         }
     });
 
-    // Captura erros de inicialização (como falta de Chrome)
     client.initialize().catch(err => {
-        console.error("ERRO FATAL Silvino: Falha ao iniciar o navegador", err);
+        console.error("ERRO AO INICIAR CLIENTE:", err);
         starting = false;
-        client = null;
     });
 
     client.on('qr', async (qr) => {
-        console.log("QR RECEBIDO Silvino - Gerando imagem...");
-        try {
-            currentQR = await qrcode.toDataURL(qr);
-        } catch (err) {
-            console.error("Erro ao converter QR para DataURL", err);
-        }
+        console.log("QR CODE GERADO - Acesse a rota /qr");
+        currentQR = await qrcode.toDataURL(qr);
     });
 
     client.on('ready', () => {
-        console.log("BOT PRONTO Silvino Soares");
+        console.log("BOT PRONTO E CONECTADO!");
         botReady = true;
         currentQR = null;
         starting = false;
     });
 
-    client.on('message', async (message) => {
-        if (message.from.includes('@g.us')) return;
-
-        const texto = message.body.toLowerCase();
-
-        if (texto === 'oi') {
-            message.reply('Olá, atendimento automático.');
-        }
-
-        if (texto === 'menu') {
-            message.reply('Menu:\n1 - Horário\n2 - Suporte\n3 - Atendente');
-        }
+    client.on('message', async (msg) => {
+        if (msg.from.includes('@g.us')) return;
+        if (msg.body.toLowerCase() === 'oi') msg.reply('Olá! Atendimento automático Silvino.');
+        if (msg.body.toLowerCase() === 'menu') msg.reply('1 - Suporte\n2 - Horários');
     });
 }
 
-// Rota de Status
+// Rotas de Monitoramento
 app.get('/status', (req, res) => {
-    res.json({
-        ready: botReady,
-        qr: currentQR ? true : false,
-        starting: starting
-    });
+    res.json({ ready: botReady, qr: !!currentQR, starting: starting });
 });
 
-// Rota do QR Code
 app.get('/qr', (req, res) => {
     if (currentQR) {
-        // Retorna a imagem diretamente para facilitar a leitura
-        res.send(`<img src="${currentQR}" style="width:300px;">`);
+        res.send(`<html><body style="background:#000;display:flex;justify-content:center;align-items:center;height:100vh;"><img src="${currentQR}" style="border:10px solid white; width:300px;"></body></html>`);
     } else {
-        res.send("QR Code ainda não disponível. Verifique o /status");
+        res.send("QR Code ainda nao gerado. Aguarde 1 minuto e atualize.");
     }
 });
 
-// Rota Home
-app.get('/', (req, res) => {
-    res.send("Backend rodando Silvino - Verifique os logs do Railway");
-});
+app.get('/', (req, res) => res.send("Servidor Ativo Silvino"));
 
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
-    console.log(`Servidor rodando na porta ${PORT} Silvino`);
-    // Inicia o bot automaticamente
-    startBot();
+    console.log(`Servidor na porta ${PORT}`);
+    startBot(); // Inicia o bot assim que o servidor liga
 });

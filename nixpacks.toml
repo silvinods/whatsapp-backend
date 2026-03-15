@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["nodePackages.npm", "google-chrome", "libnss3", "glib"]
+
+[phases.build]
+cmds = ["npm install"]
+
+[start]
+cmd = "node index.js"

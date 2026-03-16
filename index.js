@@ -23,19 +23,24 @@ async function connectWhatsApp() {
     sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: ['Bot Teste', 'Chrome', '1.0.0']
+        browser: ['Bot Silvino', 'Chrome', '1.0.0']
+    });
+
+    // Listener para erros internos (evita crash)
+    sock.ev.on('error', (err) => {
+        console.error('⚠️ Erro ignorado (Baileys):', err);
     });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         if (qr) {
-            console.log('📲 QR Code gerado');
+            console.log('📲 QR gerado');
             currentQR = await qrcode.toDataURL(qr);
             botReady = false;
         }
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('❌ Conexão fechada. Reconectar?', shouldReconnect);
+            console.log('❌ Conexão fechada, reconectar?', shouldReconnect);
             botReady = false;
             currentQR = null;
             if (shouldReconnect) setTimeout(connectWhatsApp, 5000);
@@ -50,23 +55,21 @@ async function connectWhatsApp() {
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        // Ignora mensagens enviadas pelo próprio bot e mensagens de grupo
         if (!msg.message || msg.key.fromMe) return;
         if (msg.key.remoteJid.endsWith('@g.us')) return;
 
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
         const from = msg.key.remoteJid;
 
-        console.log(`📩 Mensagem recebida de ${from}: "${text}"`);
+        console.log(`📩 Mensagem de ${from}: "${text}"`);
 
-        // Responde com um eco para QUALQUER texto (teste)
-        if (text) {
-            try {
-                await sock.sendMessage(from, { text: `Você disse: "${text}"` });
-                console.log('✅ Resposta enviada (eco)');
-            } catch (err) {
-                console.error('❌ Erro ao enviar resposta:', err);
-            }
+        if (text.toLowerCase() === 'oi') {
+            await sock.sendMessage(from, { text: 'Olá! Atendimento automático.' });
+        } else if (text.toLowerCase() === 'menu') {
+            await sock.sendMessage(from, { text: '1 - Suporte\n2 - Horários' });
+        } else if (text) {
+            // echo para teste
+            await sock.sendMessage(from, { text: `Eco: "${text}"` });
         }
     });
 }
@@ -74,14 +77,14 @@ async function connectWhatsApp() {
 app.get('/status', (req, res) => res.json({ ready: botReady, qr: !!currentQR }));
 app.get('/qr', (req, res) => {
     if (currentQR) {
-        res.send(`<html><body style="background:#000;display:flex;justify-content:center;align-items:center;"><div style="background:#fff;padding:20px;"><img src="${currentQR}" style="width:300px;"></div></body></html>`);
+        res.send(`<html><body style="background:#000;display:flex;justify-content:center;"><div style="background:#fff;padding:20px;"><img src="${currentQR}" style="width:300px;"></div></body></html>`);
     } else {
         res.status(404).send('QR não disponível');
     }
 });
-app.get('/', (req, res) => res.send('Bot rodando - modo eco'));
+app.get('/', (req, res) => res.send('Bot rodando'));
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`🚀 Servidor na porta ${PORT}`);
     connectWhatsApp();
 });

@@ -1,9 +1,10 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const pino = require('pino'); // opcional: reduzir logs
 
 // ==================== CONFIGURAÇÕES ====================
 const app = express();
@@ -12,61 +13,54 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 const SESSION_DIR = path.join(__dirname, 'auth_info');
-const RESET_KEY = '123'; // 🔐 Chave simples para segurança (mude se quiser)
+const RESET_KEY = '123';
 
-// Garante que a pasta de sessão existe
 if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
-// ==================== TRATAMENTO GLOBAL DE ERROS ====================
-process.on('uncaughtException', (err) => {
-    console.error('🔥 Exceção não capturada (ignorada):', err);
-});
-process.on('unhandledRejection', (err) => {
-    console.error('🔥 Rejeição não tratada (ignorada):', err);
-});
+// ==================== TRATAMENTO DE ERROS ====================
+process.on('uncaughtException', (err) => console.error('🔥 Exceção:', err));
+process.on('unhandledRejection', (err) => console.error('🔥 Rejeição:', err));
 
-// ==================== ESTADO DO BOT ====================
+// ==================== ESTADO ====================
 let sock = null;
 let currentQR = null;
 let botReady = false;
 
-// ==================== FUNÇÃO PRINCIPAL DE CONEXÃO ====================
+// ==================== CONEXÃO WHATSAPP ====================
 async function connectWhatsApp() {
     try {
-        console.log('🔄 Iniciando conexão com WhatsApp...');
+        // Busca a versão mais recente compatível
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        console.log(`📦 Versão do Baileys: ${version.join('.')} (última: ${isLatest})`);
+
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
         sock = makeWASocket({
+            version,
             auth: state,
             printQRInTerminal: false,
             browser: ['Bot Silvino', 'Chrome', '1.0.0'],
             syncFullHistory: false,
-            markOnlineOnConnect: true
-        });
-
-        sock.ev.on('error', (err) => {
-            console.error('⚠️ Erro interno do Baileys (ignorado):', err);
+            markOnlineOnConnect: true,
+            defaultQueryTimeoutMs: 60000, // aumenta timeout
+            logger: pino({ level: 'silent' }) // silencia logs internos (opcional)
         });
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
-
             if (qr) {
-                console.log('📲 QR Code gerado!');
+                console.log('📲 QR gerado');
                 currentQR = await qrcode.toDataURL(qr);
                 botReady = false;
             }
-
             if (connection === 'close') {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log('❌ Conexão fechada. Reconectar?', shouldReconnect);
+                console.log('❌ Conexão fechada, reconectar?', shouldReconnect);
                 botReady = false;
                 currentQR = null;
-                if (shouldReconnect) {
-                    setTimeout(connectWhatsApp, 5000);
-                }
+                if (shouldReconnect) setTimeout(connectWhatsApp, 5000);
             } else if (connection === 'open') {
-                console.log('✅ Bot pronto e conectado!');
+                console.log('✅ Bot pronto!');
                 botReady = true;
                 currentQR = null;
             }
@@ -74,7 +68,7 @@ async function connectWhatsApp() {
 
         sock.ev.on('creds.update', saveCreds);
 
-        // ========== PROCESSAMENTO DE MENSAGENS ==========
+        // ========== PROCESSAR MENSAGENS ==========
         sock.ev.on('messages.upsert', async ({ messages }) => {
             try {
                 const msg = messages[0];
@@ -89,99 +83,57 @@ async function connectWhatsApp() {
 
                 console.log(`📩 Mensagem de ${from}: "${text}"`);
 
-                // ===== RESPOSTAS AUTOMÁTICAS =====
+                // Comandos (adicione quantos quiser)
+                const lowerText = text.toLowerCase();
                 let resposta = null;
-                if (text.toLowerCase() === 'oi') {
-                    resposta = 'Olá! Atendimento automático Silvino.';
-                } else if (text.toLowerCase() === 'menu') {
-                    resposta = '1 - Suporte\n2 - Horários';
-                } else if (text.toLowerCase() === 'status') {
-                    resposta = 'Bot está online e funcionando!';
-                } else {
-                    return; // ignora mensagens não reconhecidas
-                }
+                if (lowerText === 'oi') resposta = 'Olá! Atendimento automático Silvino.';
+                else if (lowerText === 'menu') resposta = '1 - Suporte\n2 - Horários';
+                else if (lowerText === 'status') resposta = 'Bot online e funcionando!';
+                else return;
 
-                if (resposta) {
-                    try {
-                        const sent = await sock.sendMessage(from, { text: resposta });
-                        console.log(`✅ Resposta enviada! ID: ${sent.key.id}`);
-                    } catch (sendErr) {
-                        console.error('❌ Falha no envio:', sendErr);
-                    }
-                }
+                const sent = await sock.sendMessage(from, { text: resposta });
+                console.log(`✅ Resposta enviada, ID: ${sent.key.id}`);
             } catch (err) {
                 console.error('❌ Erro ao processar mensagem:', err);
             }
         });
 
     } catch (err) {
-        console.error('💥 Erro na inicialização:', err);
+        console.error('💥 Erro fatal na conexão:', err);
         setTimeout(connectWhatsApp, 10000);
     }
 }
 
-// ==================== ROTAS DA API ====================
+// ==================== ROTAS ====================
+app.get('/status', (req, res) => res.json({ ready: botReady, qr: !!currentQR }));
 
-// Rota de status
-app.get('/status', (req, res) => {
-    res.json({ ready: botReady, qr: !!currentQR });
-});
-
-// Rota do QR code
 app.get('/qr', (req, res) => {
     if (currentQR) {
-        res.send(`<html>
-            <body style="background:#000;display:flex;justify-content:center;align-items:center;height:100vh;">
-                <div style="background:#fff;padding:20px;border-radius:10px;">
-                    <img src="${currentQR}" style="width:300px;">
-                </div>
-            </body>
-        </html>`);
+        res.send(`<html><body style="background:#000;display:flex;justify-content:center;align-items:center;height:100vh;">
+            <div style="background:#fff;padding:20px;border-radius:10px;">
+                <img src="${currentQR}" style="width:300px;">
+            </div></body></html>`);
     } else {
-        res.status(404).send('QR Code não disponível. Aguarde...');
+        res.status(404).send('QR não disponível');
     }
 });
 
-// 🚀 ROTA DE RESET (com chave de segurança)
 app.get('/reset', (req, res) => {
-    const key = req.query.key;
-    
-    if (key !== RESET_KEY) {
-        return res.status(403).send('Chave inválida!');
-    }
-
+    if (req.query.key !== RESET_KEY) return res.status(403).send('Chave inválida');
     try {
-        // Remove a pasta de sessão
-        if (fs.existsSync(SESSION_DIR)) {
-            fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-            console.log('🗑️ Pasta de sessão removida via /reset');
-        }
-
-        // Desconecta o socket se estiver ativo
-        if (sock) {
-            sock.end();
-            sock = null;
-        }
-        
+        if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+        if (sock) sock.end();
         botReady = false;
         currentQR = null;
-
-        // Reinicia o processo de conexão
         setTimeout(connectWhatsApp, 2000);
-
-        res.send('✅ Sessão resetada! Acesse /qr em alguns segundos para escanear o novo código.');
+        res.send('✅ Sessão resetada. Acesse /qr em instantes.');
     } catch (err) {
-        console.error('Erro ao resetar:', err);
-        res.status(500).send('Erro ao resetar sessão.');
+        res.status(500).send('Erro ao resetar');
     }
 });
 
-// Rota raiz
-app.get('/', (req, res) => {
-    res.send('✅ Bot rodando. Acesse /qr para conectar ou /reset?key=123 para resetar.');
-});
+app.get('/', (req, res) => res.send('✅ Bot rodando. Acesse /qr ou /reset?key=123'));
 
-// ==================== INICIALIZAÇÃO ====================
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Servidor na porta ${PORT}`);
     connectWhatsApp();

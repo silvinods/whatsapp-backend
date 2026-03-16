@@ -1,4 +1,8 @@
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+// CORREÇÃO CRÍTICA: garante que o crypto esteja disponível globalmente
+const crypto = require('crypto');
+global.crypto = crypto;
+
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const qrcode = require('qrcode');
 const fs = require('fs');
@@ -10,65 +14,163 @@ const SESSION_DIR = path.join(__dirname, 'auth_info');
 
 if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
-let currentQR = null;
 let sock = null;
+let currentQR = null;
+let botAtivo = true;
 
-// Função com logs detalhados
-async function connect() {
-    console.log('1️⃣ Iniciando connect()...');
+// ========== FUNÇÃO PARA OBTER O NÚMERO DO BOT ==========
+function getBotNumber() {
+    return sock?.user?.id ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : null;
+}
+
+// ========== RESPOSTAS AUTOMÁTICAS ==========
+const respostas = {
+    'oi': 'Olá! Como posso ajudar?',
+    'ola': 'Olá! Como posso ajudar?',
+    'nino': 'Olá! O Silvino não está no momento, mas deixe sua mensagem que ele retorna assim que possível.',
+    'esta em casa': 'O Silvino não está em casa agora. Deixe seu recado!',
+    'ta por onde': 'Ele não está por perto no momento. Em que posso ajudar?',
+    'vem aqui': 'Infelizmente ele não pode ir agora. Deixe sua mensagem.',
+    'oi meu anjo': 'Olá! 😊 Como posso ajudar você?',
+    'bom dia': 'Bom dia! Em que posso ser útil?',
+    'boa tarde': 'Boa tarde! Como posso ajudar?',
+    'boa noite': 'Boa noite! Em que posso auxiliar?',
+    'menu': '📋 *Menu de opções*\n1 - Informações\n2 - Suporte\n3 - Horários',
+    'ajuda': 'Comandos disponíveis: oi, menu, info, suporte, horarios, contato',
+    'tchau': 'Até logo! Se precisar, estou aqui.',
+    'obrigado': 'Por nada! Estou à disposição.'
+};
+
+// ========== CONEXÃO COM WHATSAPP ==========
+async function connectWhatsApp() {
     try {
-        console.log('2️⃣ Buscando versão do Baileys...');
-        const { version, isLatest } = await fetchLatestBaileysVersion();
-        console.log(`   ✅ Versão obtida: ${version.join('.')} (última: ${isLatest})`);
-
-        console.log('3️⃣ Carregando estado de autenticação...');
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-        console.log('   ✅ Estado carregado.');
 
-        console.log('4️⃣ Criando socket...');
         sock = makeWASocket({
-            version,
             auth: state,
             printQRInTerminal: false,
-            browser: ['Bot Teste', 'Chrome', '1.0.0'],
+            browser: ['Bot Silvino', 'Chrome', '1.0.0'],
             syncFullHistory: false,
+            markOnlineOnConnect: true
         });
-        console.log('   ✅ Socket criado.');
 
-        console.log('5️⃣ Registrando eventos...');
         sock.ev.on('connection.update', async (update) => {
-            console.log('   🔔 Evento connection.update:', JSON.stringify(update, null, 2));
-            const { qr, connection } = update;
+            const { connection, lastDisconnect, qr } = update;
+
             if (qr) {
-                console.log('   📲 QR Code recebido! Gerando imagem...');
+                console.log('📲 QR Code gerado!');
                 currentQR = await qrcode.toDataURL(qr);
             }
-            if (connection === 'open') {
-                console.log('   ✅ Conectado!');
+
+            if (connection === 'close') {
+                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                console.log('❌ Conexão fechada. Reconectar?', shouldReconnect);
+                currentQR = null;
+                if (shouldReconnect) {
+                    setTimeout(connectWhatsApp, 5000);
+                }
+            } else if (connection === 'open') {
+                console.log('✅ Bot pronto e conectado!');
+                console.log('📞 Número do bot:', getBotNumber());
                 currentQR = null;
             }
         });
 
         sock.ev.on('creds.update', saveCreds);
-        console.log('6️⃣ Eventos registrados. Aguardando QR...');
+
+        sock.ev.on('messages.upsert', async ({ messages }) => {
+            try {
+                const msg = messages[0];
+                if (!msg.message || msg.key.fromMe) return;
+                if (msg.key.remoteJid.endsWith('@g.us')) return;
+
+                const text = msg.message.conversation ||
+                            msg.message.extendedTextMessage?.text ||
+                            msg.message.imageMessage?.caption ||
+                            '';
+                const from = msg.key.remoteJid;
+                const lowerText = text.toLowerCase().trim();
+
+                console.log(`📩 Mensagem de ${from}: "${text}"`);
+
+                // Verifica se é o dono (mesmo número do bot)
+                const isOwner = from === getBotNumber();
+
+                // Comandos do dono (só funcionam se enviados do próprio número do bot)
+                if (isOwner) {
+                    if (lowerText === '!desligar' || lowerText === '!off') {
+                        botAtivo = false;
+                        await sock.sendMessage(from, { text: '🔴 Bot desativado.' });
+                        console.log('🔴 Bot desativado');
+                        return;
+                    }
+                    if (lowerText === '!ligar' || lowerText === '!on') {
+                        botAtivo = true;
+                        await sock.sendMessage(from, { text: '🟢 Bot ativado.' });
+                        console.log('🟢 Bot ativado');
+                        return;
+                    }
+                }
+
+                // Se o bot estiver desligado, não responde ninguém (exceto comandos do dono, já tratados)
+                if (!botAtivo) {
+                    console.log('🤖 Bot desligado, ignorando mensagem');
+                    return;
+                }
+
+                // Busca resposta automática
+                let resposta = null;
+                for (const [key, value] of Object.entries(respostas)) {
+                    if (lowerText.includes(key)) {
+                        resposta = value;
+                        break;
+                    }
+                }
+
+                if (!resposta) {
+                    resposta = 'Desculpe, não entendi. Digite "ajuda" para ver os comandos.';
+                }
+
+                await sock.sendMessage(from, { text: resposta });
+                console.log(`✅ Resposta enviada para ${from}`);
+
+            } catch (err) {
+                console.error('❌ Erro ao processar mensagem:', err);
+            }
+        });
+
     } catch (err) {
-        console.error('💥 Erro em connect():', err);
+        console.error('💥 Erro fatal na conexão:', err);
+        setTimeout(connectWhatsApp, 10000);
     }
 }
 
+// ========== ROTAS PARA O FRONTEND ==========
+app.get('/status', (req, res) => {
+    res.json({
+        ready: sock?.user ? true : false,
+        qr: !!currentQR,
+        botAtivo,
+        numeroBot: getBotNumber()
+    });
+});
+
 app.get('/qr', (req, res) => {
     if (currentQR) {
-        res.send(`<img src="${currentQR}" style="width:300px;">`);
+        res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;">
+            <img src="${currentQR}" style="width:300px;">
+        </body></html>`);
     } else {
-        res.send('Aguardando QR... (log no servidor)');
+        res.status(404).send('QR Code não disponível. Aguarde...');
     }
 });
 
-app.get('/status', (req, res) => {
-    res.json({ qr: !!currentQR, connected: sock?.user ? true : false });
+app.get('/', (req, res) => {
+    res.send('✅ Bot WhatsApp rodando. Acesse /qr para conectar e /status para ver estado.');
 });
 
+// ========== INICIALIZAÇÃO ==========
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Servidor rodando na porta ${PORT}`);
-    connect();
+    connectWhatsApp();
 });

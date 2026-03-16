@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-bot",
   "version": "1.0.0",
-  "description": "Bot WhatsApp simples",
+  "description": "Bot WhatsApp automático",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

@@ -76,13 +76,13 @@ function iniciarBot() {
         if (isOwner) {
             if (texto === '!desligar' || texto === '!off' || texto === 'desligar' || texto === 'off') {
                 botAtivo = false;
-                await message.reply('🔴 Bot desativado.');
+                await client.sendMessage(message.from, '🔴 Bot desativado.');
                 console.log('🔴 Bot desativado pelo dono');
                 return;
             }
             if (texto === '!ligar' || texto === '!on' || texto === 'ligar' || texto === 'on') {
                 botAtivo = true;
-                await message.reply('🟢 Bot ativado.');
+                await client.sendMessage(message.from, '🟢 Bot ativado.');
                 console.log('🟢 Bot ativado pelo dono');
                 return;
             }
@@ -123,7 +123,8 @@ function iniciarBot() {
             resposta = 'Desculpe, não entendi. Digite "ajuda" para ver os comandos.';
         }
 
-        await message.reply(resposta);
+        // Envia a mensagem diretamente (sem reply)
+        await client.sendMessage(message.from, resposta);
         console.log('✅ Resposta enviada');
     });
 

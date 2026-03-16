@@ -12,16 +12,18 @@ const PORT = process.env.PORT || 8080;
 let client = null;
 let currentQR = null;
 let botReady = false;
-let botAtivo = true; // estado atual do bot (ligado/desligado)
+let botAtivo = true; // controle de respostas automáticas
 
-// Função para obter o número do bot (para comparar com remetente)
+// ========== FUNÇÃO PARA OBTER O NÚMERO DO BOT ==========
 async function getBotNumber() {
-    if (!client) return null;
-    const info = await client.info;
-    return info.wid._serialized;
+    if (client && botReady) {
+        const info = await client.info;
+        return info.wid._serialized;
+    }
+    return null;
 }
 
-// Inicializa o cliente WhatsApp
+// ========== INICIALIZA DO BOT ==========
 function iniciarBot() {
     client = new Client({
         authStrategy: new LocalAuth(),
@@ -39,16 +41,14 @@ function iniciarBot() {
     });
 
     client.on('qr', async (qr) => {
-        console.log('QR Code gerado');
+        console.log('📲 QR Code gerado');
         currentQR = await qrcode.toDataURL(qr);
     });
 
-    client.on('ready', async () => {
-        console.log('Bot pronto!');
+    client.on('ready', () => {
+        console.log('✅ Bot pronto!');
         botReady = true;
         currentQR = null;
-        const numero = await getBotNumber();
-        console.log('Número do bot:', numero);
     });
 
     client.on('message', async (message) => {
@@ -56,69 +56,114 @@ function iniciarBot() {
         if (message.fromMe) return; // ignora próprias mensagens
 
         const texto = message.body.toLowerCase().trim();
-        console.log(`Mensagem de ${message.from}: ${texto}`);
+        console.log(`📩 Mensagem de ${message.from}: ${texto}`);
 
         // Verifica se é o dono (mesmo número do bot)
-        const botNumber = await getBotNumber();
-        const isOwner = message.from === botNumber;
+        const info = await client.info;
+        const isOwner = message.from === info.wid._serialized;
 
+        // Comandos do dono (via mensagem)
         if (isOwner) {
-            // Comandos do dono (sempre funcionam, independente do botAtivo)
             if (texto === '!desligar' || texto === '!off') {
                 botAtivo = false;
-                await message.reply('🔴 Bot desativado. Não responderei a ninguém.');
-                console.log('Bot desativado pelo dono via mensagem');
+                await message.reply('🔴 Bot desativado.');
+                console.log('🔴 Bot desativado pelo dono');
                 return;
             }
             if (texto === '!ligar' || texto === '!on') {
                 botAtivo = true;
                 await message.reply('🟢 Bot ativado.');
-                console.log('Bot ativado pelo dono via mensagem');
+                console.log('🟢 Bot ativado pelo dono');
                 return;
             }
         }
 
-        // Se não for dono, e o bot estiver desativado, ignora
+        // Se o bot estiver desativado, não responde ninguém (exceto comandos do dono já tratados)
         if (!botAtivo) {
-            console.log('Bot desativado, ignorando mensagem');
+            console.log('🤖 Bot desativado, ignorando mensagem');
             return;
         }
 
-        // Se chegou aqui, é porque o bot está ativo e a mensagem é de outra pessoa.
-        // Por padrão, não respondemos nada (apenas log). Se quiser respostas automáticas, descomente abaixo.
-        // await message.reply('Olá! Em breve retornarei.');
+        // ===== RESPOSTAS AUTOMÁTICAS =====
+        const respostas = {
+            'oi': 'Olá! Como posso ajudar?',
+            'ola': 'Olá! Como posso ajudar?',
+            'nino': 'Olá! O Silvino não está no momento, mas deixe sua mensagem que ele retorna assim que possível.',
+            'esta em casa': 'O Silvino não está em casa agora. Deixe seu recado!',
+            'ta por onde': 'Ele não está por perto no momento. Em que posso ajudar?',
+            'vem aqui': 'Infelizmente ele não pode ir agora. Deixe sua mensagem.',
+            'oi meu anjo': 'Olá! 😊 Como posso ajudar você?',
+            'bom dia': 'Bom dia! Em que posso ser útil?',
+            'boa tarde': 'Boa tarde! Como posso ajudar?',
+            'boa noite': 'Boa noite! Em que posso auxiliar?',
+            'menu': '📋 *Menu de opções*\n1 - Informações\n2 - Suporte\n3 - Horários',
+            'ajuda': 'Comandos disponíveis: oi, menu, info, suporte, horarios, contato',
+            'tchau': 'Até logo! Se precisar, estou aqui.',
+            'obrigado': 'Por nada! Estou à disposição.'
+        };
+
+        let resposta = null;
+        for (const [key, value] of Object.entries(respostas)) {
+            if (texto.includes(key)) {
+                resposta = value;
+                break;
+            }
+        }
+
+        if (!resposta) {
+            resposta = 'Desculpe, não entendi. Digite "ajuda" para ver os comandos.';
+        }
+
+        await message.reply(resposta);
+        console.log('✅ Resposta enviada');
     });
 
     client.initialize();
 }
 
-// Rotas para o frontend
-app.get('/status', (req, res) => {
-    res.json({ ready: botReady, qr: !!currentQR, botAtivo });
+// ========== ROTAS PARA O FRONTEND ==========
+
+// Rota de status (usada pelo frontend)
+app.get('/status', async (req, res) => {
+    const numeroBot = botReady ? (await client.info).wid._serialized : null;
+    res.json({
+        ready: botReady,
+        qr: !!currentQR,
+        botAtivo: botAtivo,
+        numeroBot: numeroBot
+    });
 });
 
+// Rota do QR code (usada pelo frontend)
 app.get('/qr', (req, res) => {
     if (currentQR) {
         res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;">
             <img src="${currentQR}" style="width:300px;">
         </body></html>`);
     } else {
-        res.status(404).send('QR não disponível');
+        res.status(404).send('QR Code não disponível. Aguarde...');
     }
 });
 
-// Rota para ligar/desligar via frontend
+// Rota para ligar/desligar via API (opcional, pode ser usada pelo frontend)
 app.post('/toggle', (req, res) => {
-    botAtivo = !botAtivo;
-    console.log(`Bot ${botAtivo ? 'ativado' : 'desativado'} via frontend`);
-    res.json({ botAtivo });
+    const { ativo } = req.body; // espera { "ativo": true } ou false
+    if (typeof ativo === 'boolean') {
+        botAtivo = ativo;
+        console.log(`Bot ${ativo ? 'ativado' : 'desativado'} via API`);
+        res.json({ success: true, botAtivo });
+    } else {
+        res.status(400).json({ error: 'Parâmetro "ativo" booleano obrigatório' });
+    }
 });
 
+// Rota raiz
 app.get('/', (req, res) => {
-    res.send('Bot rodando');
+    res.send('✅ Bot WhatsApp rodando. Acesse /qr para conectar e /status para ver estado.');
 });
 
+// ========== INICIALIZAÇÃO DO SERVIDOR ==========
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
     iniciarBot();
 });

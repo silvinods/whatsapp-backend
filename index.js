@@ -9,14 +9,13 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const MONGO_URI = process.env.MONGO_URI; // Obrigatório
+const MONGO_URI = process.env.MONGO_URI;
 
 if (!MONGO_URI) {
     console.error('❌ ERRO: Variável MONGO_URI não definida no ambiente.');
     process.exit(1);
 }
 
-// ========== CONEXÃO COM MONGODB ==========
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Conectado ao MongoDB Atlas'))
     .catch(err => {
@@ -24,7 +23,6 @@ mongoose.connect(MONGO_URI)
         process.exit(1);
     });
 
-// ========== MODELO DE CADASTRO ==========
 const cadastroSchema = new mongoose.Schema({
     nome: String,
     sobrenome: String,
@@ -36,16 +34,13 @@ const cadastroSchema = new mongoose.Schema({
 });
 const Cadastro = mongoose.model('Cadastro', cadastroSchema);
 
-// ========== ESTADO DO BOT ==========
 let client = null;
 let currentQR = null;
 let botReady = false;
 let botAtivo = true;
 
-// Mapa de estado dos usuários: { ultimaResposta: timestamp, etapa: string, dados: object }
 const userState = new Map();
 
-// ========== FUNÇÕES AUXILIARES ==========
 function normalizarTexto(texto) {
     return texto
         .toLowerCase()
@@ -70,7 +65,6 @@ async function getBotNumber() {
     return null;
 }
 
-// ========== INICIALIZAÇÃO DO BOT ==========
 function iniciarBot() {
     client = new Client({
         authStrategy: new LocalAuth(),
@@ -99,15 +93,13 @@ function iniciarBot() {
     });
 
     client.on('message', async (message) => {
-        // Filtros gerais
-        if (message.from.includes('@g.us')) return; // ignora grupos
-        if (message.fromMe) return; // ignora próprias mensagens
+        if (message.from.includes('@g.us')) return;
+        if (message.fromMe) return;
 
         const userId = message.from;
         const info = await client.info;
         const isOwner = userId === info.wid._serialized;
 
-        // ===== COMANDOS DO DONO (sempre processados) =====
         if (isOwner && message.type === 'chat' && message.body) {
             const texto = normalizarTexto(message.body);
             if (texto === '!desligar' || texto === '!off' || texto === 'desligar' || texto === 'off') {
@@ -124,7 +116,6 @@ function iniciarBot() {
             }
         }
 
-        // Se o bot estiver desativado, ignora (exceto comandos do dono já tratados)
         if (!botAtivo) {
             console.log('🤖 Bot desativado, ignorando mensagem');
             return;
@@ -133,8 +124,6 @@ function iniciarBot() {
         const agora = Date.now();
         let estado = userState.get(userId) || { ultimaResposta: 0, etapa: null, dados: {} };
 
-        // ===== CONTROLE DE SILÊNCIO (evita respostas repetidas) =====
-        // Se não estiver em meio a um fluxo (cadastro) e já respondeu nos últimos 5 minutos, ignora
         if (!estado.etapa && (agora - estado.ultimaResposta < 300000)) {
             console.log(`⏳ Ignorando mensagem de ${userId} (dentro do período de silêncio)`);
             return;
@@ -142,16 +131,13 @@ function iniciarBot() {
 
         let resposta = '';
 
-        // ===== PROCESSAMENTO BASEADO NO TIPO DE MENSAGEM =====
         if (message.type === 'chat') {
             if (!message.body) return;
             const textoOriginal = message.body;
             const texto = normalizarTexto(textoOriginal);
             console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
 
-            // Se o usuário está em alguma etapa de cadastro
             if (estado.etapa) {
-                // Fluxo de cadastro
                 switch (estado.etapa) {
                     case 'aguardando_nome':
                         estado.dados.nome = textoOriginal;
@@ -179,9 +165,7 @@ function iniciarBot() {
                         } else {
                             estado.dados.email = '';
                         }
-                        // Finaliza o cadastro
                         try {
-                            // Salva no MongoDB
                             const novo = new Cadastro({
                                 nome: estado.dados.nome,
                                 sobrenome: estado.dados.sobrenome,
@@ -196,7 +180,6 @@ function iniciarBot() {
                             console.error('Erro ao salvar cadastro:', err);
                             resposta = '❌ Erro ao salvar seus dados. Tente novamente mais tarde.';
                         }
-                        // Limpa o estado
                         estado.etapa = null;
                         estado.dados = {};
                         break;
@@ -204,50 +187,43 @@ function iniciarBot() {
                         estado.etapa = null;
                 }
             } else {
-                // Não está em cadastro: verifica se é uma opção do menu
                 if (texto === '1' || texto === '2' || texto === '3' || texto === '4' || texto === '5') {
-                    // Menu principal
                     switch (texto) {
                         case '1':
-                            resposta = 'Opção 1: Informações gerais. Aqui você pode colocar qualquer texto.';
-                            break;
-                        case '2':
-                            resposta = 'Opção 2: Suporte. Em breve alguém falará com você.';
-                            break;
-                        case '3':
-                            resposta = 'Opção 3: Horários. Estamos disponíveis 24h por dia.';
-                            break;
-                        case '4':
-                            resposta = 'Opção 4: Deixar recado. Por favor, envie sua mensagem que o Silvino verá depois.';
-                            // Aqui você pode implementar o salvamento de recados
-                            break;
-                        case '5':
-                            // Inicia o fluxo de cadastro
                             estado.etapa = 'aguardando_nome';
                             estado.dados = {};
                             resposta = 'Vamos fazer seu cadastro! Qual seu nome?';
                             break;
+                        case '2':
+                            resposta = 'Opção 2: Informações gerais. Aqui você pode colocar qualquer texto.';
+                            break;
+                        case '3':
+                            resposta = 'Opção 3: Suporte. Em breve alguém falará com você.';
+                            break;
+                        case '4':
+                            resposta = 'Opção 4: Horários. Estamos disponíveis 24h por dia.';
+                            break;
+                        case '5':
+                            resposta = 'Opção 5: Deixar recado. Por favor, envie sua mensagem que o Silvino verá depois.';
+                            break;
                     }
                 } else {
-                    // Mensagem não reconhecida: oferece o menu
                     const saudacao = getSaudacao();
                     resposta = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem que ele responderá assim que possível.\n\n` +
                                `Enquanto isso, posso ajudar com alguma informação? Escolha uma opção:\n` +
-                               `1 - Informações gerais\n` +
-                               `2 - Suporte\n` +
-                               `3 - Horários\n` +
-                               `4 - Deixar recado\n` +
-                               `5 - Fazer cadastro`;
+                               `1 - Fazer cadastro\n` +
+                               `2 - Informações gerais\n` +
+                               `3 - Suporte\n` +
+                               `4 - Horários\n` +
+                               `5 - Deixar recado`;
                 }
             }
 
-            // Atualiza o timestamp e estado
             estado.ultimaResposta = agora;
             userState.set(userId, estado);
             await client.sendMessage(userId, resposta);
             console.log(`✅ Resposta enviada para ${userId}`);
         } else {
-            // Mensagens de mídia
             const tipo = message.type;
             console.log(`📎 Mídia recebida de ${userId}, tipo: ${tipo}`);
 
@@ -267,7 +243,6 @@ function iniciarBot() {
                 resposta = '📎 Mídia recebida! O Silvino vai ver quando possível.';
             }
 
-            // Atualiza timestamp (mas não altera o estado de cadastro, se houver)
             estado.ultimaResposta = agora;
             userState.set(userId, estado);
             await client.sendMessage(userId, resposta);
@@ -278,7 +253,6 @@ function iniciarBot() {
     client.initialize();
 }
 
-// ========== ROTAS DA API ==========
 app.get('/status', async (req, res) => {
     const numeroBot = botReady ? (await client.info).wid._serialized : null;
     res.json({
@@ -310,10 +284,7 @@ app.post('/toggle', (req, res) => {
     }
 });
 
-// Rota para listar cadastros (exemplo de painel)
 app.get('/cadastros', async (req, res) => {
-    // Proteção simples: verifica se a requisição tem um token ou senha (opcional)
-    // Por simplicidade, vamos deixar pública, mas em produção coloque autenticação
     try {
         const cadastros = await Cadastro.find().sort({ data: -1 });
         res.json(cadastros);
@@ -326,7 +297,6 @@ app.get('/', (req, res) => {
     res.send('✅ Bot WhatsApp com cadastro rodando. Acesse /qr para conectar e /status para ver estado.');
 });
 
-// ========== INICIALIZAÇÃO DO SERVIDOR ==========
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Servidor rodando na porta ${PORT}`);
     iniciarBot();

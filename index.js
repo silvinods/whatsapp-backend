@@ -9,13 +9,14 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const MONGO_URI = process.env.MONGO_URI;
+const MONGO_URI = process.env.MONGO_URI; // Obrigatório
 
 if (!MONGO_URI) {
     console.error('❌ ERRO: Variável MONGO_URI não definida no ambiente.');
     process.exit(1);
 }
 
+// ========== CONEXÃO COM MONGODB ==========
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Conectado ao MongoDB Atlas'))
     .catch(err => {
@@ -23,6 +24,7 @@ mongoose.connect(MONGO_URI)
         process.exit(1);
     });
 
+// ========== MODELO DE CADASTRO ==========
 const cadastroSchema = new mongoose.Schema({
     nome: String,
     sobrenome: String,
@@ -34,13 +36,16 @@ const cadastroSchema = new mongoose.Schema({
 });
 const Cadastro = mongoose.model('Cadastro', cadastroSchema);
 
+// ========== ESTADO DO BOT ==========
 let client = null;
 let currentQR = null;
 let botReady = false;
 let botAtivo = true;
 
+// Mapa de estado dos usuários: { ultimaResposta: timestamp, etapa: string, dados: object }
 const userState = new Map();
 
+// ========== FUNÇÕES AUXILIARES ==========
 function normalizarTexto(texto) {
     return texto
         .toLowerCase()
@@ -65,6 +70,7 @@ async function getBotNumber() {
     return null;
 }
 
+// ========== INICIALIZAÇÃO DO BOT ==========
 function iniciarBot() {
     client = new Client({
         authStrategy: new LocalAuth(),
@@ -93,13 +99,15 @@ function iniciarBot() {
     });
 
     client.on('message', async (message) => {
-        if (message.from.includes('@g.us')) return;
-        if (message.fromMe) return;
+        // Filtros gerais
+        if (message.from.includes('@g.us')) return; // ignora grupos
+        if (message.fromMe) return; // ignora próprias mensagens
 
         const userId = message.from;
         const info = await client.info;
         const isOwner = userId === info.wid._serialized;
 
+        // ===== 1. COMANDOS DO DONO (sempre processados) =====
         if (isOwner && message.type === 'chat' && message.body) {
             const texto = normalizarTexto(message.body);
             if (texto === '!desligar' || texto === '!off' || texto === 'desligar' || texto === 'off') {
@@ -116,6 +124,7 @@ function iniciarBot() {
             }
         }
 
+        // ===== 2. SE O BOT ESTIVER DESATIVADO, IGNORA =====
         if (!botAtivo) {
             console.log('🤖 Bot desativado, ignorando mensagem');
             return;
@@ -124,40 +133,35 @@ function iniciarBot() {
         const agora = Date.now();
         let estado = userState.get(userId) || { ultimaResposta: 0, etapa: null, dados: {} };
 
-        if (!estado.etapa && (agora - estado.ultimaResposta < 300000)) {
-            console.log(`⏳ Ignorando mensagem de ${userId} (dentro do período de silêncio)`);
-            return;
-        }
-
-        let resposta = '';
-
+        // ===== 3. PROCESSAMENTO BASEADO NO TIPO DE MENSAGEM =====
         if (message.type === 'chat') {
             if (!message.body) return;
             const textoOriginal = message.body;
             const texto = normalizarTexto(textoOriginal);
             console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
 
+            // ----- A) Se o usuário está em alguma etapa de cadastro -----
             if (estado.etapa) {
                 switch (estado.etapa) {
                     case 'aguardando_nome':
                         estado.dados.nome = textoOriginal;
                         estado.etapa = 'aguardando_sobrenome';
-                        resposta = 'Qual seu sobrenome?';
+                        await client.sendMessage(userId, 'Qual seu sobrenome?');
                         break;
                     case 'aguardando_sobrenome':
                         estado.dados.sobrenome = textoOriginal;
                         estado.etapa = 'aguardando_profissao';
-                        resposta = 'Qual sua profissão?';
+                        await client.sendMessage(userId, 'Qual sua profissão?');
                         break;
                     case 'aguardando_profissao':
                         estado.dados.profissao = textoOriginal;
                         estado.etapa = 'aguardando_telefone';
-                        resposta = 'Qual seu telefone para contato?';
+                        await client.sendMessage(userId, 'Qual seu telefone para contato?');
                         break;
                     case 'aguardando_telefone':
                         estado.dados.telefone = textoOriginal;
                         estado.etapa = 'aguardando_email';
-                        resposta = 'Qual seu e-mail? (opcional, digite "não" para pular)';
+                        await client.sendMessage(userId, 'Qual seu e-mail? (opcional, digite "não" para pular)');
                         break;
                     case 'aguardando_email':
                         if (textoOriginal.toLowerCase() !== 'não' && textoOriginal.includes('@')) {
@@ -165,83 +169,119 @@ function iniciarBot() {
                         } else {
                             estado.dados.email = '';
                         }
-                        try {
-                            const novo = new Cadastro({
-                                nome: estado.dados.nome,
-                                sobrenome: estado.dados.sobrenome,
-                                profissao: estado.dados.profissao,
-                                telefone: estado.dados.telefone,
-                                email: estado.dados.email,
-                                whatsapp: userId
-                            });
-                            await novo.save();
-                            resposta = '✅ Cadastro concluído com sucesso! Obrigado.';
-                        } catch (err) {
-                            console.error('Erro ao salvar cadastro:', err);
-                            resposta = '❌ Erro ao salvar seus dados. Tente novamente mais tarde.';
+                        // Entra em confirmação
+                        estado.etapa = 'aguardando_confirmacao';
+                        const resumo = `*Confirme seus dados:*\n\n` +
+                                       `Nome: ${estado.dados.nome}\n` +
+                                       `Sobrenome: ${estado.dados.sobrenome}\n` +
+                                       `Profissão: ${estado.dados.profissao}\n` +
+                                       `Telefone: ${estado.dados.telefone}\n` +
+                                       `E-mail: ${estado.dados.email || '(não informado)'}\n\n` +
+                                       `Está tudo correto? Responda *SIM* para confirmar ou *NÃO* para reiniciar.`;
+                        await client.sendMessage(userId, resumo);
+                        break;
+                    case 'aguardando_confirmacao':
+                        const confirmacao = texto.toLowerCase();
+                        if (confirmacao === 'sim') {
+                            try {
+                                const novo = new Cadastro({
+                                    nome: estado.dados.nome,
+                                    sobrenome: estado.dados.sobrenome,
+                                    profissao: estado.dados.profissao,
+                                    telefone: estado.dados.telefone,
+                                    email: estado.dados.email,
+                                    whatsapp: userId
+                                });
+                                await novo.save();
+                                await client.sendMessage(userId, '✅ Cadastro concluído com sucesso! Obrigado.');
+                                estado.etapa = null;
+                                estado.dados = {};
+                            } catch (err) {
+                                console.error('Erro ao salvar cadastro:', err);
+                                await client.sendMessage(userId, '❌ Erro ao salvar seus dados. Tente novamente mais tarde.');
+                                estado.etapa = null;
+                                estado.dados = {};
+                            }
+                        } else if (confirmacao === 'não' || confirmacao === 'nao') {
+                            estado.etapa = 'aguardando_nome';
+                            estado.dados = {};
+                            await client.sendMessage(userId, 'OK, vamos recomeçar. Qual seu nome?');
+                        } else {
+                            await client.sendMessage(userId, 'Por favor, responda *SIM* para confirmar ou *NÃO* para reiniciar.');
                         }
-                        estado.etapa = null;
-                        estado.dados = {};
                         break;
                     default:
                         estado.etapa = null;
                 }
-            } else {
-                if (texto === '1' || texto === '2' || texto === '3' || texto === '4' || texto === '5') {
-                    switch (texto) {
-                        case '1':
-                            estado.etapa = 'aguardando_nome';
-                            estado.dados = {};
-                            resposta = 'Vamos fazer seu cadastro! Qual seu nome?';
-                            break;
-                        case '2':
-                            resposta = 'Opção 2: Informações gerais. Aqui você pode colocar qualquer texto.';
-                            break;
-                        case '3':
-                            resposta = 'Opção 3: Suporte. Em breve alguém falará com você.';
-                            break;
-                        case '4':
-                            resposta = 'Opção 4: Horários. Estamos disponíveis 24h por dia.';
-                            break;
-                        case '5':
-                            resposta = 'Opção 5: Deixar recado. Por favor, envie sua mensagem que o Silvino verá depois.';
-                            break;
-                    }
-                } else {
-                    const saudacao = getSaudacao();
-                    resposta = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem que ele responderá assim que possível.\n\n` +
-                               `Enquanto isso, posso ajudar com alguma informação? Escolha uma opção:\n` +
-                               `1 - Fazer cadastro\n` +
-                               `2 - Informações gerais\n` +
-                               `3 - Suporte\n` +
-                               `4 - Horários\n` +
-                               `5 - Deixar recado`;
-                }
+                // Atualiza timestamp e estado, e sai
+                estado.ultimaResposta = agora;
+                userState.set(userId, estado);
+                return;
             }
 
+            // ----- B) Se não está em cadastro, verifica se é opção do menu -----
+            if (texto === '1' || texto === '2' || texto === '3' || texto === '4' || texto === '5') {
+                let resposta = '';
+                switch (texto) {
+                    case '1':
+                        resposta = 'Opção 1: Informações gerais. Aqui você pode colocar qualquer texto.';
+                        break;
+                    case '2':
+                        resposta = 'Opção 2: Suporte. Em breve alguém falará com você.';
+                        break;
+                    case '3':
+                        resposta = 'Opção 3: Horários. Estamos disponíveis 24h por dia.';
+                        break;
+                    case '4':
+                        resposta = 'Opção 4: Deixar recado. Por favor, envie sua mensagem que o Silvino verá depois.';
+                        break;
+                    case '5':
+                        estado.etapa = 'aguardando_nome';
+                        estado.dados = {};
+                        resposta = 'Vamos fazer seu cadastro! Qual seu nome?';
+                        break;
+                }
+                estado.ultimaResposta = agora;
+                userState.set(userId, estado);
+                await client.sendMessage(userId, resposta);
+                console.log(`✅ Resposta de menu enviada para ${userId}`);
+                return;
+            }
+
+            // ----- C) Mensagem comum (não é opção e não está em cadastro) -----
+            // Aplica silêncio de 5 minutos (300000 ms)
+            if (agora - estado.ultimaResposta < 300000) {
+                console.log(`⏳ Ignorando mensagem de ${userId} (dentro do período de silêncio)`);
+                return;
+            }
+
+            // Oferece o menu
+            const saudacao = getSaudacao();
+            const respostaMenu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem que ele responderá assim que possível.\n\n` +
+                                 `Enquanto isso, posso ajudar com alguma informação? Escolha uma opção:\n` +
+                                 `1 - Informações gerais\n` +
+                                 `2 - Suporte\n` +
+                                 `3 - Horários\n` +
+                                 `4 - Deixar recado\n` +
+                                 `5 - Fazer cadastro`;
             estado.ultimaResposta = agora;
             userState.set(userId, estado);
-            await client.sendMessage(userId, resposta);
-            console.log(`✅ Resposta enviada para ${userId}`);
+            await client.sendMessage(userId, respostaMenu);
+            console.log(`✅ Menu enviado para ${userId}`);
+
         } else {
+            // ===== MENSAGENS DE MÍDIA =====
             const tipo = message.type;
             console.log(`📎 Mídia recebida de ${userId}, tipo: ${tipo}`);
 
-            if (tipo === 'image') {
-                resposta = '📸 Foto recebida! O Silvino vai ver assim que possível.';
-            } else if (tipo === 'audio') {
-                resposta = '🎤 Áudio recebido! Ele vai ouvir quando voltar.';
-            } else if (tipo === 'video') {
-                resposta = '🎥 Vídeo recebido! Será visto em breve.';
-            } else if (tipo === 'document') {
-                resposta = '📄 Documento recebido! Foi encaminhado para análise.';
-            } else if (tipo === 'location') {
-                resposta = '📍 Localização recebida! Isso pode ajudar a identificar a área.';
-            } else if (tipo === 'vcard') {
-                resposta = '👤 Contato recebido! Será salvo para futuras conversas.';
-            } else {
-                resposta = '📎 Mídia recebida! O Silvino vai ver quando possível.';
-            }
+            let resposta = '';
+            if (tipo === 'image') resposta = '📸 Foto recebida! O Silvino vai ver assim que possível.';
+            else if (tipo === 'audio') resposta = '🎤 Áudio recebido! Ele vai ouvir quando voltar.';
+            else if (tipo === 'video') resposta = '🎥 Vídeo recebido! Será visto em breve.';
+            else if (tipo === 'document') resposta = '📄 Documento recebido! Foi encaminhado para análise.';
+            else if (tipo === 'location') resposta = '📍 Localização recebida! Isso pode ajudar a identificar a área.';
+            else if (tipo === 'vcard') resposta = '👤 Contato recebido! Será salvo para futuras conversas.';
+            else resposta = '📎 Mídia recebida! O Silvino vai ver quando possível.';
 
             estado.ultimaResposta = agora;
             userState.set(userId, estado);
@@ -253,6 +293,7 @@ function iniciarBot() {
     client.initialize();
 }
 
+// ========== ROTAS DA API ==========
 app.get('/status', async (req, res) => {
     const numeroBot = botReady ? (await client.info).wid._serialized : null;
     res.json({
@@ -284,6 +325,7 @@ app.post('/toggle', (req, res) => {
     }
 });
 
+// Rota para listar cadastros (painel administrativo)
 app.get('/cadastros', async (req, res) => {
     try {
         const cadastros = await Cadastro.find().sort({ data: -1 });
@@ -297,6 +339,7 @@ app.get('/', (req, res) => {
     res.send('✅ Bot WhatsApp com cadastro rodando. Acesse /qr para conectar e /status para ver estado.');
 });
 
+// ========== INICIALIZAÇÃO DO SERVIDOR ==========
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Servidor rodando na porta ${PORT}`);
     iniciarBot();

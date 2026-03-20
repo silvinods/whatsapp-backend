@@ -73,6 +73,12 @@ async function getBotNumber() {
 
 // ========== FUNÇÃO PARA GERAR PAGAMENTO PIX ==========
 async function gerarPagamentoPix(telefone, valor = 10.00) {
+
+console.log('🔄 Gerando pagamento com token:', MP_ACCESS_TOKEN ? 'Token presente' : 'Token ausente');
+const response = await fetch('https://api.mercadopago.com/v1/payments', ...);
+const data = await response.json();
+console.log('📦 Resposta completa do Mercado Pago:', JSON.stringify(data, null, 2));
+
     if (!MP_ACCESS_TOKEN) {
         console.error('Token do Mercado Pago não configurado');
         return null;

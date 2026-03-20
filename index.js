@@ -17,7 +17,7 @@ if (!MONGO_URI) {
     console.error('❌ ERRO: Variável MONGO_URI não definida.');
     process.exit(1);
 }
-
+//Minha conexão ao MongoDB
 // ========== CONEXÃO MONGODB ==========
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Conectado ao MongoDB Atlas'))
@@ -71,7 +71,7 @@ async function getBotNumber() {
     }
     return null;
 }
-
+//onde está a função do QR Code para escaniar
 // ========== FUNÇÃO PARA GERAR PAGAMENTO PIX (CORRIGIDA) ==========
 async function gerarPagamentoPix(telefone, valor = 10.00) {
 

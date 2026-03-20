@@ -9,14 +9,15 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const MONGO_URI = process.env.MONGO_URI; // Obrigatório
+const MONGO_URI = process.env.MONGO_URI;
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN; // Token do Mercado Pago (conta de teste)
 
 if (!MONGO_URI) {
-    console.error('❌ ERRO: Variável MONGO_URI não definida no ambiente.');
+    console.error('❌ ERRO: Variável MONGO_URI não definida.');
     process.exit(1);
 }
 
-// ========== CONEXÃO COM MONGODB ==========
+// ========== CONEXÃO MONGODB ==========
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Conectado ao MongoDB Atlas'))
     .catch(err => {
@@ -24,7 +25,7 @@ mongoose.connect(MONGO_URI)
         process.exit(1);
     });
 
-// ========== MODELO DE CADASTRO ==========
+// ========== MODELO DE CADASTRO (com ID do pagamento) ==========
 const cadastroSchema = new mongoose.Schema({
     nome: String,
     sobrenome: String,
@@ -32,7 +33,9 @@ const cadastroSchema = new mongoose.Schema({
     telefone: String,
     email: String,
     whatsapp: { type: String, required: true, unique: true },
-    data: { type: Date, default: Date.now }
+    data: { type: Date, default: Date.now },
+    pagamentoId: { type: String }, // ID do pagamento no Mercado Pago
+    pagamentoStatus: { type: String, default: 'pendente' } // pendente, aprovado, etc.
 });
 const Cadastro = mongoose.model('Cadastro', cadastroSchema);
 
@@ -41,9 +44,7 @@ let client = null;
 let currentQR = null;
 let botReady = false;
 let botAtivo = true;
-
-// Mapa de estado dos usuários: { ultimaResposta: timestamp, etapa: string, dados: object }
-const userState = new Map();
+const userState = new Map(); // { ultimaResposta, etapa, dados, pagamentoId }
 
 // ========== FUNÇÕES AUXILIARES ==========
 function normalizarTexto(texto) {
@@ -68,6 +69,45 @@ async function getBotNumber() {
         return info.wid._serialized;
     }
     return null;
+}
+
+// ========== FUNÇÃO PARA GERAR PAGAMENTO PIX ==========
+async function gerarPagamentoPix(telefone, valor = 10.00) {
+    if (!MP_ACCESS_TOKEN) {
+        console.error('Token do Mercado Pago não configurado');
+        return null;
+    }
+
+    try {
+        const response = await fetch('https://api.mercadopago.com/v1/payments', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                transaction_amount: valor,
+                description: 'Agendamento Barbearia',
+                payment_method_id: 'pix',
+                payer: { email: `${telefone}@exemplo.com` }
+            })
+        });
+
+        const data = await response.json();
+        if (data.status === 'pending') {
+            return {
+                id: data.id,
+                qr_code_base64: data.point_of_interaction.transaction_data.qr_code_base64,
+                qr_code: data.point_of_interaction.transaction_data.qr_code
+            };
+        } else {
+            console.error('Erro ao gerar pagamento:', data);
+            return null;
+        }
+    } catch (err) {
+        console.error('Erro na requisição ao Mercado Pago:', err);
+        return null;
+    }
 }
 
 // ========== INICIALIZAÇÃO DO BOT ==========
@@ -99,15 +139,14 @@ function iniciarBot() {
     });
 
     client.on('message', async (message) => {
-        // Filtros gerais
-        if (message.from.includes('@g.us')) return; // ignora grupos
-        if (message.fromMe) return; // ignora próprias mensagens
+        if (message.from.includes('@g.us')) return;
+        if (message.fromMe) return;
 
         const userId = message.from;
         const info = await client.info;
         const isOwner = userId === info.wid._serialized;
 
-        // ===== 1. COMANDOS DO DONO (sempre processados) =====
+        // Comandos do dono
         if (isOwner && message.type === 'chat' && message.body) {
             const texto = normalizarTexto(message.body);
             if (texto === '!desligar' || texto === '!off' || texto === 'desligar' || texto === 'off') {
@@ -124,7 +163,6 @@ function iniciarBot() {
             }
         }
 
-        // ===== 2. SE O BOT ESTIVER DESATIVADO, IGNORA =====
         if (!botAtivo) {
             console.log('🤖 Bot desativado, ignorando mensagem');
             return;
@@ -133,15 +171,15 @@ function iniciarBot() {
         const agora = Date.now();
         let estado = userState.get(userId) || { ultimaResposta: 0, etapa: null, dados: {} };
 
-        // ===== 3. PROCESSAMENTO BASEADO NO TIPO DE MENSAGEM =====
         if (message.type === 'chat') {
             if (!message.body) return;
             const textoOriginal = message.body;
             const texto = normalizarTexto(textoOriginal);
             console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
 
-            // ----- A) Se o usuário está em alguma etapa de cadastro -----
+            // ---------- FLUXO DE CADASTRO / MENU ----------
             if (estado.etapa) {
+                // Processa etapas
                 switch (estado.etapa) {
                     case 'aguardando_nome':
                         estado.dados.nome = textoOriginal;
@@ -169,8 +207,7 @@ function iniciarBot() {
                         } else {
                             estado.dados.email = '';
                         }
-                        // Entra em confirmação
-                        estado.etapa = 'aguardando_confirmacao';
+                        // Mostrar resumo
                         const resumo = `*Confirme seus dados:*\n\n` +
                                        `Nome: ${estado.dados.nome}\n` +
                                        `Sobrenome: ${estado.dados.sobrenome}\n` +
@@ -179,10 +216,84 @@ function iniciarBot() {
                                        `E-mail: ${estado.dados.email || '(não informado)'}\n\n` +
                                        `Está tudo correto? Responda *SIM* para confirmar ou *NÃO* para reiniciar.`;
                         await client.sendMessage(userId, resumo);
+                        estado.etapa = 'aguardando_confirmacao';
                         break;
                     case 'aguardando_confirmacao':
                         const confirmacao = texto.toLowerCase();
                         if (confirmacao === 'sim') {
+                            // Verifica se já existe cadastro
+                            const existente = await Cadastro.findOne({ whatsapp: userId });
+                            if (existente) {
+                                await client.sendMessage(userId, 'Você já possui um cadastro. Se precisar atualizar, entre em contato com o suporte.');
+                                estado.etapa = null;
+                                estado.dados = {};
+                            } else {
+                                // Pergunta se deseja pagar
+                                await client.sendMessage(userId, 'Deseja fazer o pagamento agora? (sim/não)');
+                                estado.etapa = 'aguardando_pagamento';
+                            }
+                        } else if (confirmacao === 'não' || confirmacao === 'nao') {
+                            estado.etapa = 'aguardando_nome';
+                            estado.dados = {};
+                            await client.sendMessage(userId, 'OK, vamos recomeçar. Qual seu nome?');
+                        } else {
+                            await client.sendMessage(userId, 'Por favor, responda *SIM* para confirmar ou *NÃO* para reiniciar.');
+                        }
+                        break;
+                    case 'aguardando_pagamento':
+                        const querPagar = texto.toLowerCase();
+                        if (querPagar === 'sim') {
+                            // Gera pagamento
+                            await client.sendMessage(userId, '⏳ Gerando QR code de pagamento...');
+                            const pagamento = await gerarPagamentoPix(estado.dados.telefone, 10.00);
+                            if (pagamento) {
+                                // Salva o ID do pagamento no estado
+                                estado.pagamentoId = pagamento.id;
+                                // Envia o QR code como imagem
+                                const buffer = Buffer.from(pagamento.qr_code_base64, 'base64');
+                                await client.sendMessage(userId, { image: buffer, caption: '🔹 *QR Code PIX* 🔹\nEscaneie para pagar:' });
+                                await client.sendMessage(userId, `Ou copie o código:\n\`${pagamento.qr_code}\``);
+                                // Salva cadastro no MongoDB com o ID do pagamento
+                                try {
+                                    const novo = new Cadastro({
+                                        nome: estado.dados.nome,
+                                        sobrenome: estado.dados.sobrenome,
+                                        profissao: estado.dados.profissao,
+                                        telefone: estado.dados.telefone,
+                                        email: estado.dados.email,
+                                        whatsapp: userId,
+                                        pagamentoId: pagamento.id,
+                                        pagamentoStatus: 'pendente'
+                                    });
+                                    await novo.save();
+                                    await client.sendMessage(userId, '✅ *Cadastro concluído!*\nSeu pagamento está sendo processado. Assim que confirmado, você receberá um aviso.');
+                                } catch (err) {
+                                    console.error('Erro ao salvar cadastro:', err);
+                                    await client.sendMessage(userId, '❌ Erro ao salvar seus dados. Tente novamente mais tarde.');
+                                }
+                            } else {
+                                await client.sendMessage(userId, '❌ Não foi possível gerar o QR code. Tente novamente mais tarde.');
+                                // Se falhou, salva cadastro sem pagamento?
+                                try {
+                                    const novo = new Cadastro({
+                                        nome: estado.dados.nome,
+                                        sobrenome: estado.dados.sobrenome,
+                                        profissao: estado.dados.profissao,
+                                        telefone: estado.dados.telefone,
+                                        email: estado.dados.email,
+                                        whatsapp: userId
+                                    });
+                                    await novo.save();
+                                    await client.sendMessage(userId, '✅ Cadastro concluído! O pagamento poderá ser feito depois.');
+                                } catch (err) {
+                                    console.error('Erro ao salvar cadastro:', err);
+                                    await client.sendMessage(userId, '❌ Erro ao salvar seus dados.');
+                                }
+                            }
+                            estado.etapa = null;
+                            estado.dados = {};
+                        } else if (querPagar === 'não' || querPagar === 'nao') {
+                            // Salva cadastro sem pagamento
                             try {
                                 const novo = new Cadastro({
                                     nome: estado.dados.nome,
@@ -193,48 +304,33 @@ function iniciarBot() {
                                     whatsapp: userId
                                 });
                                 await novo.save();
-                                await client.sendMessage(userId, '✅ Cadastro concluído com sucesso! Obrigado.');
-                                estado.etapa = null;
-                                estado.dados = {};
+                                await client.sendMessage(userId, '✅ Cadastro concluído! O pagamento poderá ser feito depois.');
                             } catch (err) {
                                 console.error('Erro ao salvar cadastro:', err);
-                                await client.sendMessage(userId, '❌ Erro ao salvar seus dados. Tente novamente mais tarde.');
-                                estado.etapa = null;
-                                estado.dados = {};
+                                await client.sendMessage(userId, '❌ Erro ao salvar seus dados.');
                             }
-                        } else if (confirmacao === 'não' || confirmacao === 'nao') {
-                            estado.etapa = 'aguardando_nome';
+                            estado.etapa = null;
                             estado.dados = {};
-                            await client.sendMessage(userId, 'OK, vamos recomeçar. Qual seu nome?');
                         } else {
-                            await client.sendMessage(userId, 'Por favor, responda *SIM* para confirmar ou *NÃO* para reiniciar.');
+                            await client.sendMessage(userId, 'Por favor, responda *SIM* para pagar agora ou *NÃO* para continuar sem pagamento.');
                         }
                         break;
                     default:
                         estado.etapa = null;
                 }
-                // Atualiza timestamp e estado, e sai
                 estado.ultimaResposta = agora;
                 userState.set(userId, estado);
                 return;
             }
 
-            // ----- B) Se não está em cadastro, verifica se é opção do menu -----
+            // ---------- MENU PRINCIPAL ----------
             if (texto === '1' || texto === '2' || texto === '3' || texto === '4' || texto === '5') {
                 let resposta = '';
                 switch (texto) {
-                    case '1':
-                        resposta = 'Opção 1: Informações gerais. Aqui você pode colocar qualquer texto.';
-                        break;
-                    case '2':
-                        resposta = 'Opção 2: Suporte. Em breve alguém falará com você.';
-                        break;
-                    case '3':
-                        resposta = 'Opção 3: Horários. Estamos disponíveis 24h por dia.';
-                        break;
-                    case '4':
-                        resposta = 'Opção 4: Deixar recado. Por favor, envie sua mensagem que o Silvino verá depois.';
-                        break;
+                    case '1': resposta = 'Opção 1: Informações gerais. Em breve disponíveis.'; break;
+                    case '2': resposta = 'Opção 2: Suporte. Entraremos em contato.'; break;
+                    case '3': resposta = 'Opção 3: Horários. Segunda a sábado, 9h-18h.'; break;
+                    case '4': resposta = 'Opção 4: Deixar recado. Envie sua mensagem.'; break;
                     case '5':
                         estado.etapa = 'aguardando_nome';
                         estado.dados = {};
@@ -248,41 +344,35 @@ function iniciarBot() {
                 return;
             }
 
-            // ----- C) Mensagem comum (não é opção e não está em cadastro) -----
-            // Aplica silêncio de 5 minutos (300000 ms)
+            // Mensagem comum: oferece menu
             if (agora - estado.ultimaResposta < 300000) {
-                console.log(`⏳ Ignorando mensagem de ${userId} (dentro do período de silêncio)`);
+                console.log(`⏳ Ignorando mensagem de ${userId} (silêncio)`);
                 return;
             }
-
-            // Oferece o menu
             const saudacao = getSaudacao();
-            const respostaMenu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem que ele responderá assim que possível.\n\n` +
-                                 `Enquanto isso, posso ajudar com alguma informação? Escolha uma opção:\n` +
-                                 `1 - Informações gerais\n` +
-                                 `2 - Suporte\n` +
-                                 `3 - Horários\n` +
-                                 `4 - Deixar recado\n` +
-                                 `5 - Fazer cadastro`;
+            const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem.\n\n` +
+                         `Escolha uma opção:\n` +
+                         `1 - Informações\n` +
+                         `2 - Suporte\n` +
+                         `3 - Horários\n` +
+                         `4 - Deixar recado\n` +
+                         `5 - Fazer cadastro`;
             estado.ultimaResposta = agora;
             userState.set(userId, estado);
-            await client.sendMessage(userId, respostaMenu);
+            await client.sendMessage(userId, menu);
             console.log(`✅ Menu enviado para ${userId}`);
-
         } else {
-            // ===== MENSAGENS DE MÍDIA =====
+            // Mídia
             const tipo = message.type;
             console.log(`📎 Mídia recebida de ${userId}, tipo: ${tipo}`);
-
             let resposta = '';
-            if (tipo === 'image') resposta = '📸 Foto recebida! O Silvino vai ver assim que possível.';
-            else if (tipo === 'audio') resposta = '🎤 Áudio recebido! Ele vai ouvir quando voltar.';
-            else if (tipo === 'video') resposta = '🎥 Vídeo recebido! Será visto em breve.';
-            else if (tipo === 'document') resposta = '📄 Documento recebido! Foi encaminhado para análise.';
-            else if (tipo === 'location') resposta = '📍 Localização recebida! Isso pode ajudar a identificar a área.';
-            else if (tipo === 'vcard') resposta = '👤 Contato recebido! Será salvo para futuras conversas.';
-            else resposta = '📎 Mídia recebida! O Silvino vai ver quando possível.';
-
+            if (tipo === 'image') resposta = '📸 Foto recebida! O Silvino vai ver.';
+            else if (tipo === 'audio') resposta = '🎤 Áudio recebido! Ele vai ouvir.';
+            else if (tipo === 'video') resposta = '🎥 Vídeo recebido! Será visto.';
+            else if (tipo === 'document') resposta = '📄 Documento recebido! Enviado para análise.';
+            else if (tipo === 'location') resposta = '📍 Localização recebida! Ajuda a identificar a área.';
+            else if (tipo === 'vcard') resposta = '👤 Contato recebido! Salvo para futuras conversas.';
+            else resposta = '📎 Mídia recebida! O Silvino vai ver.';
             estado.ultimaResposta = agora;
             userState.set(userId, estado);
             await client.sendMessage(userId, resposta);
@@ -293,24 +383,17 @@ function iniciarBot() {
     client.initialize();
 }
 
-// ========== ROTAS DA API ==========
+// ========== ROTAS ==========
 app.get('/status', async (req, res) => {
     const numeroBot = botReady ? (await client.info).wid._serialized : null;
-    res.json({
-        ready: botReady,
-        qr: !!currentQR,
-        botAtivo,
-        numeroBot
-    });
+    res.json({ ready: botReady, qr: !!currentQR, botAtivo, numeroBot });
 });
 
 app.get('/qr', (req, res) => {
     if (currentQR) {
-        res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;">
-            <img src="${currentQR}" style="width:300px;">
-        </body></html>`);
+        res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;"><img src="${currentQR}" style="width:300px;"></body></html>`);
     } else {
-        res.status(404).send('QR Code não disponível. Aguarde...');
+        res.status(404).send('QR Code não disponível.');
     }
 });
 
@@ -318,14 +401,12 @@ app.post('/toggle', (req, res) => {
     const { ativo } = req.body;
     if (typeof ativo === 'boolean') {
         botAtivo = ativo;
-        console.log(`Bot ${ativo ? 'ativado' : 'desativado'} via API`);
         res.json({ success: true, botAtivo });
     } else {
         res.status(400).json({ error: 'Parâmetro "ativo" booleano obrigatório' });
     }
 });
 
-// Rota para listar cadastros (painel administrativo)
 app.get('/cadastros', async (req, res) => {
     try {
         const cadastros = await Cadastro.find().sort({ data: -1 });
@@ -336,10 +417,9 @@ app.get('/cadastros', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send('✅ Bot WhatsApp com cadastro rodando. Acesse /qr para conectar e /status para ver estado.');
+    res.send('✅ Bot WhatsApp com cadastro e pagamento rodando.');
 });
 
-// ========== INICIALIZAÇÃO DO SERVIDOR ==========
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Servidor rodando na porta ${PORT}`);
     iniciarBot();

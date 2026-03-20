@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-bot",
   "version": "1.0.0",
-  "description": "Bot WhatsApp com cadastro e MongoDB",
+  "description": "Bot WhatsApp com cadastro e pagamento PIX",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

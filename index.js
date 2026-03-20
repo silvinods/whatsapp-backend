@@ -74,49 +74,67 @@ async function getBotNumber() {
 
 // ========== FUNÇÃO PARA GERAR PAGAMENTO PIX (CORRIGIDA) ==========
 async function gerarPagamentoPix(telefone, valor = 10.00) {
-    console.log('🔄 [PAGAMENTO] Iniciando geração de pagamento...');
-    console.log('🔄 Token presente?', MP_ACCESS_TOKEN ? 'Sim' : 'Não');
+
+    console.log('🔄 Iniciando pagamento PIX');
 
     if (!MP_ACCESS_TOKEN) {
-        console.error('❌ Token do Mercado Pago não configurado');
+        console.log('❌ Token não configurado');
         return null;
     }
 
-    // Gera um ID único para o cabeçalho de idempotência
     const idempotencyKey = crypto.randomUUID();
-    console.log('🔄 ID de idempotência:', idempotencyKey);
 
     try {
-        const response = await fetch('https://api.mercadopago.com/v1/payments', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
-                'Content-Type': 'application/json',
-                'X-Idempotency-Key': idempotencyKey
-            },
-            body: JSON.stringify({
-                transaction_amount: valor,
-                description: 'Agendamento Barbearia',
-                payment_method_id: 'pix',
-                payer: { email: `${telefone}@exemplo.com` }
-            })
-        });
+
+        console.log('🔄 Chamando MercadoPago...');
+
+        const response = await fetch(
+            'https://api.mercadopago.com/v1/payments',
+            {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${MP_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json',
+                    'X-Idempotency-Key': idempotencyKey
+                },
+                body: JSON.stringify({
+                    transaction_amount: valor,
+                    description: 'Agendamento Barbearia',
+                    payment_method_id: 'pix',
+                    payer: {
+                        email: 'teste@email.com'
+                    }
+                })
+            }
+        );
+
+        console.log('STATUS:', response.status);
 
         const data = await response.json();
-        console.log('📦 Resposta do Mercado Pago:', JSON.stringify(data, null, 2));
 
-        if (data.status === 'pending') {
+        console.log('RESPOSTA MP:', data);
+
+        if (
+            data.point_of_interaction &&
+            data.point_of_interaction.transaction_data
+        ) {
+
             return {
                 id: data.id,
-                qr_code_base64: data.point_of_interaction.transaction_data.qr_code_base64,
-                qr_code: data.point_of_interaction.transaction_data.qr_code
+                qr_code_base64:
+                    data.point_of_interaction.transaction_data.qr_code_base64,
+                qr_code:
+                    data.point_of_interaction.transaction_data.qr_code
             };
-        } else {
-            console.error('❌ Erro na resposta do Mercado Pago:', data);
-            return null;
+
         }
+
+        return null;
+
     } catch (err) {
-        console.error('❌ Erro na requisição ao Mercado Pago:', err);
+
+        console.log('ERRO PIX:', err);
+
         return null;
     }
 }

@@ -3,6 +3,7 @@ const express = require('express');
 const qrcode = require('qrcode');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -10,7 +11,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN; // Seu token de teste
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
 
 if (!MONGO_URI) {
     console.error('❌ ERRO: Variável MONGO_URI não definida.');
@@ -34,7 +35,7 @@ const cadastroSchema = new mongoose.Schema({
     email: String,
     whatsapp: { type: String, required: true, unique: true },
     data: { type: Date, default: Date.now },
-    pagamentoId: { type: String },      // ID do pagamento no Mercado Pago
+    pagamentoId: { type: String },
     pagamentoStatus: { type: String, default: 'pendente' }
 });
 const Cadastro = mongoose.model('Cadastro', cadastroSchema);
@@ -71,7 +72,7 @@ async function getBotNumber() {
     return null;
 }
 
-// ========== FUNÇÃO PARA GERAR PAGAMENTO PIX ==========
+// ========== FUNÇÃO PARA GERAR PAGAMENTO PIX (CORRIGIDA) ==========
 async function gerarPagamentoPix(telefone, valor = 10.00) {
     console.log('🔄 [PAGAMENTO] Iniciando geração de pagamento...');
     console.log('🔄 Token presente?', MP_ACCESS_TOKEN ? 'Sim' : 'Não');
@@ -81,12 +82,17 @@ async function gerarPagamentoPix(telefone, valor = 10.00) {
         return null;
     }
 
+    // Gera um ID único para o cabeçalho de idempotência
+    const idempotencyKey = crypto.randomUUID();
+    console.log('🔄 ID de idempotência:', idempotencyKey);
+
     try {
         const response = await fetch('https://api.mercadopago.com/v1/payments', {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'X-Idempotency-Key': idempotencyKey
             },
             body: JSON.stringify({
                 transaction_amount: valor,
@@ -225,7 +231,6 @@ function iniciarBot() {
                     case 'aguardando_confirmacao':
                         const confirmacao = texto.toLowerCase();
                         if (confirmacao === 'sim') {
-                            // Verifica se já existe cadastro
                             const existente = await Cadastro.findOne({ whatsapp: userId });
                             if (existente) {
                                 await client.sendMessage(userId, 'Você já possui um cadastro. Se precisar atualizar, entre em contato com o suporte.');

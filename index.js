@@ -87,7 +87,7 @@ async function gerarPagamentoPix(telefone, valor = 10.00) {
 
     try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout
+        const timeout = setTimeout(() => controller.abort(), 15000);
 
         const response = await fetch('https://api.mercadopago.com/v1/payments', {
             method: 'POST',
@@ -112,13 +112,13 @@ async function gerarPagamentoPix(telefone, valor = 10.00) {
 
         if (data.status === 'pending' && data.point_of_interaction?.transaction_data) {
             const qr = data.point_of_interaction.transaction_data;
-            if (!qr.qr_code_base64 || !qr.qr_code) {
-                console.error('❌ Campos de QR code ausentes na resposta:', qr);
+            if (!qr.qr_code) {
+                console.error('❌ Código copia/cola ausente na resposta:', qr);
                 return null;
             }
             return {
                 id: data.id,
-                qr_code_base64: qr.qr_code_base64,
+                qr_code_base64: qr.qr_code_base64 || null,
                 qr_code: qr.qr_code
             };
         } else {
@@ -132,7 +132,7 @@ async function gerarPagamentoPix(telefone, valor = 10.00) {
     }
 }
 
-// ========== ROTA DE TESTE DA API (para diagnóstico) ==========
+// ========== ROTA DE TESTE (diagnóstico) ==========
 app.get('/test-payment', async (req, res) => {
     if (!MP_ACCESS_TOKEN) {
         return res.status(400).json({ error: 'Token não configurado' });
@@ -276,11 +276,23 @@ function iniciarBot() {
                         if (querPagar === 'sim') {
                             await client.sendMessage(userId, '⏳ Gerando QR code de pagamento...');
                             const pagamento = await gerarPagamentoPix(estado.dados.telefone, 10.00);
-                            if (pagamento && pagamento.qr_code_base64) {
+                            if (pagamento && pagamento.qr_code) {
                                 estado.pagamentoId = pagamento.id;
-                                const buffer = Buffer.from(pagamento.qr_code_base64, 'base64');
-                                await client.sendMessage(userId, { image: buffer, caption: '🔹 *QR Code PIX* 🔹\nEscaneie para pagar:' });
-                                await client.sendMessage(userId, `Ou copie o código:\n\`${pagamento.qr_code}\``);
+                                
+                                // 1. Envia o código copia/cola (sempre funciona)
+                                await client.sendMessage(userId, `🔹 *Código PIX (copia e cola)* 🔹\n\`\`\`\n${pagamento.qr_code}\n\`\`\``);
+                                
+                                // 2. Tenta enviar a imagem (opcional)
+                                if (pagamento.qr_code_base64) {
+                                    try {
+                                        const buffer = Buffer.from(pagamento.qr_code_base64, 'base64');
+                                        await client.sendMessage(userId, { image: buffer, caption: 'Ou escaneie o QR code:' });
+                                    } catch (err) {
+                                        console.error('⚠️ Não foi possível enviar a imagem do QR:', err);
+                                    }
+                                }
+                                
+                                // Salva cadastro com ID do pagamento
                                 try {
                                     const novo = new Cadastro({
                                         nome: estado.dados.nome,
@@ -409,7 +421,7 @@ function iniciarBot() {
     client.initialize();
 }
 
-// ========== ROTAS ==========
+// ========== ROTAS DA API ==========
 app.get('/status', async (req, res) => {
     const numeroBot = botReady ? (await client.info).wid._serialized : null;
     res.json({ ready: botReady, qr: !!currentQR, botAtivo, numeroBot });

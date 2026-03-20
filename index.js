@@ -10,7 +10,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN; // Token do Mercado Pago (conta de teste)
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN; // Seu token de teste
 
 if (!MONGO_URI) {
     console.error('❌ ERRO: Variável MONGO_URI não definida.');
@@ -25,7 +25,7 @@ mongoose.connect(MONGO_URI)
         process.exit(1);
     });
 
-// ========== MODELO DE CADASTRO (com ID do pagamento) ==========
+// ========== MODELO DE CADASTRO ==========
 const cadastroSchema = new mongoose.Schema({
     nome: String,
     sobrenome: String,
@@ -34,8 +34,8 @@ const cadastroSchema = new mongoose.Schema({
     email: String,
     whatsapp: { type: String, required: true, unique: true },
     data: { type: Date, default: Date.now },
-    pagamentoId: { type: String }, // ID do pagamento no Mercado Pago
-    pagamentoStatus: { type: String, default: 'pendente' } // pendente, aprovado, etc.
+    pagamentoId: { type: String },      // ID do pagamento no Mercado Pago
+    pagamentoStatus: { type: String, default: 'pendente' }
 });
 const Cadastro = mongoose.model('Cadastro', cadastroSchema);
 
@@ -73,14 +73,11 @@ async function getBotNumber() {
 
 // ========== FUNÇÃO PARA GERAR PAGAMENTO PIX ==========
 async function gerarPagamentoPix(telefone, valor = 10.00) {
-
-console.log('🔄 Gerando pagamento com token:', MP_ACCESS_TOKEN ? 'Token presente' : 'Token ausente');
-const response = await fetch('https://api.mercadopago.com/v1/payments', ...);
-const data = await response.json();
-console.log('📦 Resposta completa do Mercado Pago:', JSON.stringify(data, null, 2));
+    console.log('🔄 [PAGAMENTO] Iniciando geração de pagamento...');
+    console.log('🔄 Token presente?', MP_ACCESS_TOKEN ? 'Sim' : 'Não');
 
     if (!MP_ACCESS_TOKEN) {
-        console.error('Token do Mercado Pago não configurado');
+        console.error('❌ Token do Mercado Pago não configurado');
         return null;
     }
 
@@ -100,6 +97,8 @@ console.log('📦 Resposta completa do Mercado Pago:', JSON.stringify(data, null
         });
 
         const data = await response.json();
+        console.log('📦 Resposta do Mercado Pago:', JSON.stringify(data, null, 2));
+
         if (data.status === 'pending') {
             return {
                 id: data.id,
@@ -107,11 +106,11 @@ console.log('📦 Resposta completa do Mercado Pago:', JSON.stringify(data, null
                 qr_code: data.point_of_interaction.transaction_data.qr_code
             };
         } else {
-            console.error('Erro ao gerar pagamento:', data);
+            console.error('❌ Erro na resposta do Mercado Pago:', data);
             return null;
         }
     } catch (err) {
-        console.error('Erro na requisição ao Mercado Pago:', err);
+        console.error('❌ Erro na requisição ao Mercado Pago:', err);
         return null;
     }
 }
@@ -183,9 +182,8 @@ function iniciarBot() {
             const texto = normalizarTexto(textoOriginal);
             console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
 
-            // ---------- FLUXO DE CADASTRO / MENU ----------
+            // ---------- FLUXO DE CADASTRO ----------
             if (estado.etapa) {
-                // Processa etapas
                 switch (estado.etapa) {
                     case 'aguardando_nome':
                         estado.dados.nome = textoOriginal;
@@ -213,7 +211,7 @@ function iniciarBot() {
                         } else {
                             estado.dados.email = '';
                         }
-                        // Mostrar resumo
+                        // Resumo dos dados
                         const resumo = `*Confirme seus dados:*\n\n` +
                                        `Nome: ${estado.dados.nome}\n` +
                                        `Sobrenome: ${estado.dados.sobrenome}\n` +
@@ -234,7 +232,6 @@ function iniciarBot() {
                                 estado.etapa = null;
                                 estado.dados = {};
                             } else {
-                                // Pergunta se deseja pagar
                                 await client.sendMessage(userId, 'Deseja fazer o pagamento agora? (sim/não)');
                                 estado.etapa = 'aguardando_pagamento';
                             }
@@ -249,17 +246,15 @@ function iniciarBot() {
                     case 'aguardando_pagamento':
                         const querPagar = texto.toLowerCase();
                         if (querPagar === 'sim') {
-                            // Gera pagamento
                             await client.sendMessage(userId, '⏳ Gerando QR code de pagamento...');
                             const pagamento = await gerarPagamentoPix(estado.dados.telefone, 10.00);
                             if (pagamento) {
-                                // Salva o ID do pagamento no estado
                                 estado.pagamentoId = pagamento.id;
-                                // Envia o QR code como imagem
+                                // Envia a imagem do QR code
                                 const buffer = Buffer.from(pagamento.qr_code_base64, 'base64');
                                 await client.sendMessage(userId, { image: buffer, caption: '🔹 *QR Code PIX* 🔹\nEscaneie para pagar:' });
                                 await client.sendMessage(userId, `Ou copie o código:\n\`${pagamento.qr_code}\``);
-                                // Salva cadastro no MongoDB com o ID do pagamento
+                                // Salva cadastro com ID do pagamento
                                 try {
                                     const novo = new Cadastro({
                                         nome: estado.dados.nome,
@@ -279,7 +274,7 @@ function iniciarBot() {
                                 }
                             } else {
                                 await client.sendMessage(userId, '❌ Não foi possível gerar o QR code. Tente novamente mais tarde.');
-                                // Se falhou, salva cadastro sem pagamento?
+                                // Salva cadastro sem pagamento (opcional)
                                 try {
                                     const novo = new Cadastro({
                                         nome: estado.dados.nome,
@@ -350,7 +345,7 @@ function iniciarBot() {
                 return;
             }
 
-            // Mensagem comum: oferece menu
+            // Mensagem comum: oferece menu com silêncio
             if (agora - estado.ultimaResposta < 300000) {
                 console.log(`⏳ Ignorando mensagem de ${userId} (silêncio)`);
                 return;

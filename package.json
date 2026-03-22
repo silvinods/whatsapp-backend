@@ -1,7 +1,7 @@
 {
-  "name": "whatsapp-bot",
+  "name": "pessoal-bot",
   "version": "1.0.0",
-  "description": "Bot WhatsApp com cadastro e pagamento PIX",
+  "description": "Bot WhatsApp pessoal com Pix e recados",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

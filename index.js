@@ -11,7 +11,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN; // Token do Mercado Pago (teste ou produção)
 
 if (!MONGO_URI) {
     console.error('❌ ERRO: Variável MONGO_URI não definida.');
@@ -26,26 +26,22 @@ mongoose.connect(MONGO_URI)
         process.exit(1);
     });
 
-// ========== MODELO DE CADASTRO ==========
-const cadastroSchema = new mongoose.Schema({
+// ========== MODELO DE RECADO ==========
+const recadoSchema = new mongoose.Schema({
     nome: String,
-    sobrenome: String,
-    profissao: String,
-    telefone: String,
-    email: String,
-    whatsapp: { type: String, required: true, unique: true },
-    data: { type: Date, default: Date.now },
-    pagamentoId: { type: String },
-    pagamentoStatus: { type: String, default: 'pendente' }
+    cidade: String,
+    mensagem: String,
+    whatsapp: { type: String, required: true },
+    data: { type: Date, default: Date.now }
 });
-const Cadastro = mongoose.model('Cadastro', cadastroSchema);
+const Recado = mongoose.model('Recado', recadoSchema);
 
 // ========== ESTADO DO BOT ==========
 let client = null;
 let currentQR = null;
 let botReady = false;
 let botAtivo = true;
-const userState = new Map();
+const userState = new Map(); // { ultimaResposta, etapa, dados }
 
 // ========== FUNÇÕES AUXILIARES ==========
 function normalizarTexto(texto) {
@@ -73,17 +69,14 @@ async function getBotNumber() {
 }
 
 // ========== FUNÇÃO PARA GERAR PAGAMENTO PIX ==========
-async function gerarPagamentoPix(telefone, valor = 10.00) {
-    console.log('🔄 [PAGAMENTO] Iniciando geração...');
-    console.log('🔄 Token presente?', MP_ACCESS_TOKEN ? 'Sim' : 'Não');
-
+async function gerarPagamentoPix(valor, telefone) {
+    console.log('🔄 Gerando pagamento PIX de R$', valor);
     if (!MP_ACCESS_TOKEN) {
         console.error('❌ Token do Mercado Pago não configurado');
         return null;
     }
 
     const idempotencyKey = crypto.randomUUID();
-    console.log('🔄 ID de idempotência:', idempotencyKey);
 
     try {
         const controller = new AbortController();
@@ -98,7 +91,7 @@ async function gerarPagamentoPix(telefone, valor = 10.00) {
             },
             body: JSON.stringify({
                 transaction_amount: valor,
-                description: 'Agendamento Barbearia',
+                description: 'Doação via WhatsApp',
                 payment_method_id: 'pix',
                 payer: { email: `${telefone}@exemplo.com` }
             }),
@@ -107,18 +100,15 @@ async function gerarPagamentoPix(telefone, valor = 10.00) {
 
         clearTimeout(timeout);
         const data = await response.json();
-        console.log('📦 Resposta do Mercado Pago (status):', response.status);
-        console.log('📦 Resposta completa:', JSON.stringify(data, null, 2));
 
         if (data.status === 'pending' && data.point_of_interaction?.transaction_data) {
             const qr = data.point_of_interaction.transaction_data;
             if (!qr.qr_code) {
-                console.error('❌ Código copia/cola ausente na resposta:', qr);
+                console.error('❌ Código copia/cola ausente');
                 return null;
             }
             return {
                 id: data.id,
-                qr_code_base64: qr.qr_code_base64 || null,
                 qr_code: qr.qr_code
             };
         } else {
@@ -127,23 +117,9 @@ async function gerarPagamentoPix(telefone, valor = 10.00) {
         }
     } catch (err) {
         console.error('❌ Erro na requisição ao Mercado Pago:', err);
-        if (err.name === 'AbortError') console.error('⏰ Timeout na requisição');
         return null;
     }
 }
-
-// ========== ROTA DE TESTE (diagnóstico) ==========
-app.get('/test-payment', async (req, res) => {
-    if (!MP_ACCESS_TOKEN) {
-        return res.status(400).json({ error: 'Token não configurado' });
-    }
-    const resultado = await gerarPagamentoPix('11999999999', 1.00);
-    if (resultado) {
-        res.json({ success: true, payment: resultado });
-    } else {
-        res.status(500).json({ error: 'Falha ao gerar pagamento' });
-    }
-});
 
 // ========== INICIALIZAÇÃO DO BOT ==========
 function iniciarBot() {
@@ -174,23 +150,26 @@ function iniciarBot() {
     });
 
     client.on('message', async (message) => {
-        if (message.from.includes('@g.us')) return;
+        // Filtros: apenas mensagens de texto, ignorar grupos e próprias mensagens
+        if (message.from.includes('@g.us')) return; // grupos
         if (message.fromMe) return;
+        if (message.type !== 'chat') return; // ignora qualquer mídia, status, etc.
+        if (!message.body) return;
 
         const userId = message.from;
         const info = await client.info;
         const isOwner = userId === info.wid._serialized;
 
-        // Comandos do dono
-        if (isOwner && message.type === 'chat' && message.body) {
+        // ===== COMANDOS DO DONO =====
+        if (isOwner && message.body) {
             const texto = normalizarTexto(message.body);
-            if (texto === '!desligar' || texto === '!off' || texto === 'desligar' || texto === 'off') {
+            if (texto === '!desligar' || texto === '!off') {
                 botAtivo = false;
                 await client.sendMessage(userId, '🔴 Bot desativado.');
                 console.log('🔴 Bot desativado pelo dono');
                 return;
             }
-            if (texto === '!ligar' || texto === '!on' || texto === 'ligar' || texto === 'on') {
+            if (texto === '!ligar' || texto === '!on') {
                 botAtivo = true;
                 await client.sendMessage(userId, '🟢 Bot ativado.');
                 console.log('🟢 Bot ativado pelo dono');
@@ -198,224 +177,112 @@ function iniciarBot() {
             }
         }
 
-        if (!botAtivo) {
-            console.log('🤖 Bot desativado, ignorando mensagem');
-            return;
-        }
+        if (!botAtivo) return;
 
         const agora = Date.now();
         let estado = userState.get(userId) || { ultimaResposta: 0, etapa: null, dados: {} };
 
-        if (message.type === 'chat') {
-            if (!message.body) return;
-            const textoOriginal = message.body;
-            const texto = normalizarTexto(textoOriginal);
-            console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
+        const textoOriginal = message.body;
+        const texto = normalizarTexto(textoOriginal);
+        console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
 
-            // ---------- FLUXO DE CADASTRO ----------
-            if (estado.etapa) {
-                switch (estado.etapa) {
-                    case 'aguardando_nome':
-                        estado.dados.nome = textoOriginal;
-                        estado.etapa = 'aguardando_sobrenome';
-                        await client.sendMessage(userId, 'Qual seu sobrenome?');
+        // ===== FLUXOS ATIVOS =====
+        if (estado.etapa) {
+            // Processa fluxo atual
+            switch (estado.etapa) {
+                case 'aguardando_valor_pix':
+                    const valor = parseFloat(textoOriginal.replace(',', '.'));
+                    if (isNaN(valor) || valor <= 0) {
+                        await client.sendMessage(userId, '❌ Valor inválido. Digite apenas números, ex: 25.50');
                         break;
-                    case 'aguardando_sobrenome':
-                        estado.dados.sobrenome = textoOriginal;
-                        estado.etapa = 'aguardando_profissao';
-                        await client.sendMessage(userId, 'Qual sua profissão?');
-                        break;
-                    case 'aguardando_profissao':
-                        estado.dados.profissao = textoOriginal;
-                        estado.etapa = 'aguardando_telefone';
-                        await client.sendMessage(userId, 'Qual seu telefone para contato?');
-                        break;
-                    case 'aguardando_telefone':
-                        estado.dados.telefone = textoOriginal;
-                        estado.etapa = 'aguardando_email';
-                        await client.sendMessage(userId, 'Qual seu e-mail? (opcional, digite "não" para pular)');
-                        break;
-                    case 'aguardando_email':
-                        if (textoOriginal.toLowerCase() !== 'não' && textoOriginal.includes('@')) {
-                            estado.dados.email = textoOriginal;
-                        } else {
-                            estado.dados.email = '';
+                    }
+                    await client.sendMessage(userId, '⏳ Gerando código Pix...');
+                    const pagamento = await gerarPagamentoPix(valor, userId);
+                    if (pagamento && pagamento.qr_code) {
+                        await client.sendMessage(userId, '🔹 *Código PIX (copia e cola)* 🔹');
+                        await client.sendMessage(userId, pagamento.qr_code);
+                        await client.sendMessage(userId, '✅ Pix gerado! Obrigado pela doação.');
+                    } else {
+                        await client.sendMessage(userId, '❌ Não foi possível gerar o Pix. Tente novamente mais tarde.');
+                    }
+                    estado = { ultimaResposta: agora, etapa: null, dados: {} };
+                    break;
+
+                case 'aguardando_recado_nome':
+                    estado.dados.nome = textoOriginal;
+                    estado.etapa = 'aguardando_recado_cidade';
+                    await client.sendMessage(userId, 'Qual sua cidade?');
+                    break;
+
+                case 'aguardando_recado_cidade':
+                    estado.dados.cidade = textoOriginal;
+                    estado.etapa = 'aguardando_recado_mensagem';
+                    await client.sendMessage(userId, 'Escreva seu recado:');
+                    break;
+
+                case 'aguardando_recado_mensagem':
+                    estado.dados.mensagem = textoOriginal;
+                    const resumo = `*Confirme seu recado:*\n\n` +
+                                   `Nome: ${estado.dados.nome}\n` +
+                                   `Cidade: ${estado.dados.cidade}\n` +
+                                   `Recado: ${estado.dados.mensagem}\n\n` +
+                                   `Está correto? (sim/não)`;
+                    await client.sendMessage(userId, resumo);
+                    estado.etapa = 'aguardando_recado_confirmacao';
+                    break;
+
+                case 'aguardando_recado_confirmacao':
+                    if (texto === 'sim') {
+                        try {
+                            const novo = new Recado({
+                                nome: estado.dados.nome,
+                                cidade: estado.dados.cidade,
+                                mensagem: estado.dados.mensagem,
+                                whatsapp: userId
+                            });
+                            await novo.save();
+                            await client.sendMessage(userId, '✅ Recado salvo com sucesso! O Silvino vai ler assim que possível.');
+                        } catch (err) {
+                            console.error('Erro ao salvar recado:', err);
+                            await client.sendMessage(userId, '❌ Erro ao salvar recado. Tente novamente.');
                         }
-                        const resumo = `*Confirme seus dados:*\n\n` +
-                                       `Nome: ${estado.dados.nome}\n` +
-                                       `Sobrenome: ${estado.dados.sobrenome}\n` +
-                                       `Profissão: ${estado.dados.profissao}\n` +
-                                       `Telefone: ${estado.dados.telefone}\n` +
-                                       `E-mail: ${estado.dados.email || '(não informado)'}\n\n` +
-                                       `Está tudo correto? Responda *SIM* para confirmar ou *NÃO* para reiniciar.`;
-                        await client.sendMessage(userId, resumo);
-                        estado.etapa = 'aguardando_confirmacao';
-                        break;
-                    case 'aguardando_confirmacao':
-                        const confirmacao = texto.toLowerCase();
-                        if (confirmacao === 'sim') {
-                            const existente = await Cadastro.findOne({ whatsapp: userId });
-                            if (existente) {
-                                await client.sendMessage(userId, 'Você já possui um cadastro. Se precisar atualizar, entre em contato com o suporte.');
-                                estado.etapa = null;
-                                estado.dados = {};
-                            } else {
-                                await client.sendMessage(userId, 'Deseja fazer o pagamento agora? (sim/não)');
-                                estado.etapa = 'aguardando_pagamento';
-                            }
-                        } else if (confirmacao === 'não' || confirmacao === 'nao') {
-                            estado.etapa = 'aguardando_nome';
-                            estado.dados = {};
-                            await client.sendMessage(userId, 'OK, vamos recomeçar. Qual seu nome?');
-                        } else {
-                            await client.sendMessage(userId, 'Por favor, responda *SIM* para confirmar ou *NÃO* para reiniciar.');
-                        }
-                        break;
-                    case 'aguardando_pagamento':
-                        const querPagar = texto.toLowerCase();
-                        if (querPagar === 'sim') {
-                            await client.sendMessage(userId, '⏳ Gerando QR code de pagamento...');
-                            const pagamento = await gerarPagamentoPix(estado.dados.telefone, 10.00);
-                            if (pagamento && pagamento.qr_code) {
-                                estado.pagamentoId = pagamento.id;
-                                
-                                // 1. Envia o código copia/cola (sempre funciona)
-                                await client.sendMessage(userId, `🔹 *Código PIX (copia e cola)* 🔹\n\`\`\`\n${pagamento.qr_code}\n\`\`\``);
-                                
-                                // 2. Tenta enviar a imagem (opcional)
-                                if (pagamento.qr_code_base64) {
-                                    try {
-                                        const buffer = Buffer.from(pagamento.qr_code_base64, 'base64');
-                                        await client.sendMessage(userId, { image: buffer, caption: 'Ou escaneie o QR code:' });
-                                    } catch (err) {
-                                        console.error('⚠️ Não foi possível enviar a imagem do QR:', err);
-                                    }
-                                }
-                                
-                                // Salva cadastro com ID do pagamento
-                                try {
-                                    const novo = new Cadastro({
-                                        nome: estado.dados.nome,
-                                        sobrenome: estado.dados.sobrenome,
-                                        profissao: estado.dados.profissao,
-                                        telefone: estado.dados.telefone,
-                                        email: estado.dados.email,
-                                        whatsapp: userId,
-                                        pagamentoId: pagamento.id,
-                                        pagamentoStatus: 'pendente'
-                                    });
-                                    await novo.save();
-                                    await client.sendMessage(userId, '✅ *Cadastro concluído!*\nSeu pagamento está sendo processado. Assim que confirmado, você receberá um aviso.');
-                                } catch (err) {
-                                    console.error('Erro ao salvar cadastro:', err);
-                                    await client.sendMessage(userId, '❌ Erro ao salvar seus dados. Tente novamente mais tarde.');
-                                }
-                            } else {
-                                console.error('❌ Pagamento retornou inválido:', pagamento);
-                                await client.sendMessage(userId, '❌ Não foi possível gerar o QR code. Tente novamente mais tarde.');
-                                try {
-                                    const novo = new Cadastro({
-                                        nome: estado.dados.nome,
-                                        sobrenome: estado.dados.sobrenome,
-                                        profissao: estado.dados.profissao,
-                                        telefone: estado.dados.telefone,
-                                        email: estado.dados.email,
-                                        whatsapp: userId
-                                    });
-                                    await novo.save();
-                                    await client.sendMessage(userId, '✅ Cadastro concluído! O pagamento poderá ser feito depois.');
-                                } catch (err) {
-                                    console.error('Erro ao salvar cadastro:', err);
-                                    await client.sendMessage(userId, '❌ Erro ao salvar seus dados.');
-                                }
-                            }
-                            estado.etapa = null;
-                            estado.dados = {};
-                        } else if (querPagar === 'não' || querPagar === 'nao') {
-                            try {
-                                const novo = new Cadastro({
-                                    nome: estado.dados.nome,
-                                    sobrenome: estado.dados.sobrenome,
-                                    profissao: estado.dados.profissao,
-                                    telefone: estado.dados.telefone,
-                                    email: estado.dados.email,
-                                    whatsapp: userId
-                                });
-                                await novo.save();
-                                await client.sendMessage(userId, '✅ Cadastro concluído! O pagamento poderá ser feito depois.');
-                            } catch (err) {
-                                console.error('Erro ao salvar cadastro:', err);
-                                await client.sendMessage(userId, '❌ Erro ao salvar seus dados.');
-                            }
-                            estado.etapa = null;
-                            estado.dados = {};
-                        } else {
-                            await client.sendMessage(userId, 'Por favor, responda *SIM* para pagar agora ou *NÃO* para continuar sem pagamento.');
-                        }
-                        break;
-                    default:
-                        estado.etapa = null;
-                }
-                estado.ultimaResposta = agora;
-                userState.set(userId, estado);
-                return;
+                        estado = { ultimaResposta: agora, etapa: null, dados: {} };
+                    } else if (texto === 'não') {
+                        await client.sendMessage(userId, 'OK, vamos recomeçar. Qual seu nome?');
+                        estado = { ultimaResposta: agora, etapa: 'aguardando_recado_nome', dados: {} };
+                    } else {
+                        await client.sendMessage(userId, 'Por favor, responda *sim* para confirmar ou *não* para recomeçar.');
+                    }
+                    break;
+
+                default:
+                    estado = { ultimaResposta: agora, etapa: null, dados: {} };
             }
 
-            // ---------- MENU PRINCIPAL ----------
-            if (texto === '1' || texto === '2' || texto === '3' || texto === '4' || texto === '5') {
-                let resposta = '';
-                switch (texto) {
-                    case '1': resposta = 'Opção 1: Informações gerais. Em breve disponíveis.'; break;
-                    case '2': resposta = 'Opção 2: Suporte. Entraremos em contato.'; break;
-                    case '3': resposta = 'Opção 3: Horários. Segunda a sábado, 9h-18h.'; break;
-                    case '4': resposta = 'Opção 4: Deixar recado. Envie sua mensagem.'; break;
-                    case '5':
-                        estado.etapa = 'aguardando_nome';
-                        estado.dados = {};
-                        resposta = 'Vamos fazer seu cadastro! Qual seu nome?';
-                        break;
-                }
-                estado.ultimaResposta = agora;
-                userState.set(userId, estado);
-                await client.sendMessage(userId, resposta);
-                console.log(`✅ Resposta de menu enviada para ${userId}`);
-                return;
-            }
-
-            // Mensagem comum: oferece menu com silêncio
-            if (agora - estado.ultimaResposta < 300000) {
-                console.log(`⏳ Ignorando mensagem de ${userId} (silêncio)`);
-                return;
-            }
-            const saudacao = getSaudacao();
-            const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem.\n\n` +
-                         `Escolha uma opção:\n` +
-                         `1 - Informações\n` +
-                         `2 - Suporte\n` +
-                         `3 - Horários\n` +
-                         `4 - Deixar recado\n` +
-                         `5 - Fazer cadastro`;
-            estado.ultimaResposta = agora;
             userState.set(userId, estado);
-            await client.sendMessage(userId, menu);
-            console.log(`✅ Menu enviado para ${userId}`);
-        } else {
-            // Mídia
-            const tipo = message.type;
-            console.log(`📎 Mídia recebida de ${userId}, tipo: ${tipo}`);
-            let resposta = '';
-            if (tipo === 'image') resposta = '📸 Foto recebida! O Silvino vai ver.';
-            else if (tipo === 'audio') resposta = '🎤 Áudio recebido! Ele vai ouvir.';
-            else if (tipo === 'video') resposta = '🎥 Vídeo recebido! Será visto.';
-            else if (tipo === 'document') resposta = '📄 Documento recebido! Enviado para análise.';
-            else if (tipo === 'location') resposta = '📍 Localização recebida! Ajuda a identificar a área.';
-            else if (tipo === 'vcard') resposta = '👤 Contato recebido! Salvo para futuras conversas.';
-            else resposta = '📎 Mídia recebida! O Silvino vai ver.';
-            estado.ultimaResposta = agora;
-            userState.set(userId, estado);
-            await client.sendMessage(userId, resposta);
-            console.log(`✅ Resposta de mídia enviada para ${userId}`);
+            return;
         }
+
+        // ===== SE NÃO ESTÁ EM FLUXO, OFERECE MENU =====
+        // Verifica silêncio (5 minutos)
+        if (agora - estado.ultimaResposta < 300000) {
+            console.log(`⏳ Ignorando mensagem de ${userId} (silêncio)`);
+            return;
+        }
+
+        const saudacao = getSaudacao();
+        const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar seu recado.\n\n` +
+                     `Escolha uma opção:\n` +
+                     `1 - Fazer um Pix (doação)\n` +
+                     `2 - Deixar um recado\n` +
+                     `\nDigite o número da opção.`;
+
+        await client.sendMessage(userId, menu);
+        console.log(`✅ Menu enviado para ${userId}`);
+
+        // Aguarda a próxima mensagem para processar a escolha
+        estado.ultimaResposta = agora;
+        userState.set(userId, estado);
     });
 
     client.initialize();
@@ -424,7 +291,12 @@ function iniciarBot() {
 // ========== ROTAS DA API ==========
 app.get('/status', async (req, res) => {
     const numeroBot = botReady ? (await client.info).wid._serialized : null;
-    res.json({ ready: botReady, qr: !!currentQR, botAtivo, numeroBot });
+    res.json({
+        ready: botReady,
+        qr: !!currentQR,
+        botAtivo,
+        numeroBot
+    });
 });
 
 app.get('/qr', (req, res) => {
@@ -445,17 +317,17 @@ app.post('/toggle', (req, res) => {
     }
 });
 
-app.get('/cadastros', async (req, res) => {
+app.get('/recados', async (req, res) => {
     try {
-        const cadastros = await Cadastro.find().sort({ data: -1 });
-        res.json(cadastros);
+        const recados = await Recado.find().sort({ data: -1 });
+        res.json(recados);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
 app.get('/', (req, res) => {
-    res.send('✅ Bot WhatsApp com cadastro e pagamento rodando.');
+    res.send('✅ Bot pessoal rodando. Acesse /qr para conectar e /status para ver estado.');
 });
 
 app.listen(PORT, '0.0.0.0', () => {

@@ -11,7 +11,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN; // Token do Mercado Pago (teste ou produção)
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
 
 if (!MONGO_URI) {
     console.error('❌ ERRO: Variável MONGO_URI não definida.');
@@ -41,7 +41,7 @@ let client = null;
 let currentQR = null;
 let botReady = false;
 let botAtivo = true;
-const userState = new Map(); // { ultimaResposta, etapa, dados }
+const userState = new Map(); // { ultimaResposta, etapa, dados, aguardandoMenu }
 
 // ========== FUNÇÕES AUXILIARES ==========
 function normalizarTexto(texto) {
@@ -53,7 +53,10 @@ function normalizarTexto(texto) {
 }
 
 function getSaudacao() {
-    const hora = new Date().getHours();
+    // Ajusta para horário de Brasília (UTC-3)
+    const now = new Date();
+    const brasilia = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+    const hora = brasilia.getHours();
     if (hora >= 6 && hora < 12) return 'Bom dia';
     if (hora >= 12 && hora < 18) return 'Boa tarde';
     if (hora >= 18 && hora < 24) return 'Boa noite';
@@ -91,7 +94,7 @@ async function gerarPagamentoPix(valor, telefone) {
             },
             body: JSON.stringify({
                 transaction_amount: valor,
-                description: 'Doação via WhatsApp',
+                description: 'Pix via WhatsApp',
                 payment_method_id: 'pix',
                 payer: { email: `${telefone}@exemplo.com` }
             }),
@@ -156,13 +159,20 @@ function iniciarBot() {
         if (message.type !== 'chat') return; // ignora qualquer mídia, status, etc.
         if (!message.body) return;
 
+        // Ignora mensagens que contenham links (URLs)
+        const body = message.body;
+        if (body.includes('http://') || body.includes('https://')) {
+            console.log('🔗 Link ignorado:', body);
+            return;
+        }
+
         const userId = message.from;
         const info = await client.info;
         const isOwner = userId === info.wid._serialized;
 
         // ===== COMANDOS DO DONO =====
-        if (isOwner && message.body) {
-            const texto = normalizarTexto(message.body);
+        if (isOwner) {
+            const texto = normalizarTexto(body);
             if (texto === '!desligar' || texto === '!off') {
                 botAtivo = false;
                 await client.sendMessage(userId, '🔴 Bot desativado.');
@@ -180,15 +190,47 @@ function iniciarBot() {
         if (!botAtivo) return;
 
         const agora = Date.now();
-        let estado = userState.get(userId) || { ultimaResposta: 0, etapa: null, dados: {} };
+        let estado = userState.get(userId) || { ultimaResposta: 0, etapa: null, dados: {}, aguardandoMenu: false };
 
-        const textoOriginal = message.body;
+        const textoOriginal = body;
         const texto = normalizarTexto(textoOriginal);
         console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
 
-        // ===== FLUXOS ATIVOS =====
+        // ===== SE ESTIVER AGUARDANDO ESCOLHA DO MENU =====
+        if (estado.aguardandoMenu) {
+            estado.aguardandoMenu = false; // limpa a flag
+
+            if (texto === '1') {
+                // Fluxo do Pix
+                await client.sendMessage(userId, 'Qual o valor que deseja enviar? (digite apenas números, ex: 25.50)');
+                estado.etapa = 'aguardando_valor_pix';
+                estado.dados = {};
+            } else if (texto === '2') {
+                // Fluxo do recado
+                await client.sendMessage(userId, 'Qual seu nome?');
+                estado.etapa = 'aguardando_recado_nome';
+                estado.dados = {};
+            } else {
+                // Opção inválida, repete o menu
+                const saudacao = getSaudacao();
+                const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem ou escolher uma dessas opções:\n\n` +
+                             `1 - Fazer um Pix\n` +
+                             `2 - Deixar um recado\n\n` +
+                             `Digite o número da opção.`;
+                await client.sendMessage(userId, menu);
+                estado.aguardandoMenu = true;
+                estado.ultimaResposta = agora;
+                userState.set(userId, estado);
+                return;
+            }
+
+            estado.ultimaResposta = agora;
+            userState.set(userId, estado);
+            return;
+        }
+
+        // ===== SE ESTIVER EM ALGUM FLUXO (PIX ou RECADO) =====
         if (estado.etapa) {
-            // Processa fluxo atual
             switch (estado.etapa) {
                 case 'aguardando_valor_pix':
                     const valor = parseFloat(textoOriginal.replace(',', '.'));
@@ -201,11 +243,11 @@ function iniciarBot() {
                     if (pagamento && pagamento.qr_code) {
                         await client.sendMessage(userId, '🔹 *Código PIX (copia e cola)* 🔹');
                         await client.sendMessage(userId, pagamento.qr_code);
-                        await client.sendMessage(userId, '✅ Pix gerado! Obrigado pela doação.');
+                        await client.sendMessage(userId, '✅ Pix gerado! Obrigado.');
                     } else {
                         await client.sendMessage(userId, '❌ Não foi possível gerar o Pix. Tente novamente mais tarde.');
                     }
-                    estado = { ultimaResposta: agora, etapa: null, dados: {} };
+                    estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
                     break;
 
                 case 'aguardando_recado_nome':
@@ -246,42 +288,34 @@ function iniciarBot() {
                             console.error('Erro ao salvar recado:', err);
                             await client.sendMessage(userId, '❌ Erro ao salvar recado. Tente novamente.');
                         }
-                        estado = { ultimaResposta: agora, etapa: null, dados: {} };
+                        estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
                     } else if (texto === 'não') {
                         await client.sendMessage(userId, 'OK, vamos recomeçar. Qual seu nome?');
-                        estado = { ultimaResposta: agora, etapa: 'aguardando_recado_nome', dados: {} };
+                        estado = { ultimaResposta: agora, etapa: 'aguardando_recado_nome', dados: {}, aguardandoMenu: false };
                     } else {
                         await client.sendMessage(userId, 'Por favor, responda *sim* para confirmar ou *não* para recomeçar.');
                     }
                     break;
 
                 default:
-                    estado = { ultimaResposta: agora, etapa: null, dados: {} };
+                    estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
             }
-
             userState.set(userId, estado);
             return;
         }
 
-        // ===== SE NÃO ESTÁ EM FLUXO, OFERECE MENU =====
-        // Verifica silêncio (5 minutos)
-        if (agora - estado.ultimaResposta < 300000) {
-            console.log(`⏳ Ignorando mensagem de ${userId} (silêncio)`);
-            return;
-        }
-
+        // ===== SE NÃO ESTÁ EM NENHUM FLUXO, OFERECE MENU =====
         const saudacao = getSaudacao();
-        const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar seu recado.\n\n` +
-                     `Escolha uma opção:\n` +
-                     `1 - Fazer um Pix (doação)\n` +
-                     `2 - Deixar um recado\n` +
-                     `\nDigite o número da opção.`;
+        const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem ou escolher uma dessas opções:\n\n` +
+                     `1 - Fazer um Pix\n` +
+                     `2 - Deixar um recado\n\n` +
+                     `Digite o número da opção.`;
 
         await client.sendMessage(userId, menu);
         console.log(`✅ Menu enviado para ${userId}`);
 
-        // Aguarda a próxima mensagem para processar a escolha
-        estado.ultimaResposta = agora;
+        // Define que está aguardando a escolha do menu (ignora o silêncio)
+        estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: true };
         userState.set(userId, estado);
     });
 

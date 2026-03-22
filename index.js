@@ -41,7 +41,7 @@ let client = null;
 let currentQR = null;
 let botReady = false;
 let botAtivo = true;
-const userState = new Map(); // { ultimaResposta, etapa, dados, aguardandoMenu }
+const userState = new Map();
 
 // ========== FUNÇÕES AUXILIARES ==========
 function normalizarTexto(texto) {
@@ -53,7 +53,7 @@ function normalizarTexto(texto) {
 }
 
 function getSaudacao() {
-    // Ajusta para horário de Brasília (UTC-3)
+    // Horário de Brasília (UTC-3)
     const now = new Date();
     const brasilia = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
     const hora = brasilia.getHours();
@@ -96,13 +96,15 @@ async function gerarPagamentoPix(valor, telefone) {
                 transaction_amount: valor,
                 description: 'Pix via WhatsApp',
                 payment_method_id: 'pix',
-                payer: { email: `${telefone}@exemplo.com` }
+                payer: { email: 'silpixvsoav@gmil.com' } // E-mail fixo do pagador
             }),
             signal: controller.signal
         });
 
         clearTimeout(timeout);
         const data = await response.json();
+        console.log('📦 Status HTTP:', response.status);
+        console.log('📦 Resposta completa:', JSON.stringify(data, null, 2));
 
         if (data.status === 'pending' && data.point_of_interaction?.transaction_data) {
             const qr = data.point_of_interaction.transaction_data;
@@ -120,9 +122,23 @@ async function gerarPagamentoPix(valor, telefone) {
         }
     } catch (err) {
         console.error('❌ Erro na requisição ao Mercado Pago:', err);
+        if (err.name === 'AbortError') console.error('⏰ Timeout na requisição');
         return null;
     }
 }
+
+// ========== ROTA DE TESTE (opcional) ==========
+app.get('/test-payment', async (req, res) => {
+    if (!MP_ACCESS_TOKEN) {
+        return res.status(400).json({ error: 'Token não configurado' });
+    }
+    const resultado = await gerarPagamentoPix(1.00, '11999999999');
+    if (resultado) {
+        res.json({ success: true, payment: resultado });
+    } else {
+        res.status(500).json({ error: 'Falha ao gerar pagamento' });
+    }
+});
 
 // ========== INICIALIZAÇÃO DO BOT ==========
 function iniciarBot() {
@@ -153,13 +169,13 @@ function iniciarBot() {
     });
 
     client.on('message', async (message) => {
-        // Filtros: apenas mensagens de texto, ignorar grupos e próprias mensagens
-        if (message.from.includes('@g.us')) return; // grupos
+        // Filtros
+        if (message.from.includes('@g.us')) return;
         if (message.fromMe) return;
-        if (message.type !== 'chat') return; // ignora qualquer mídia, status, etc.
+        if (message.type !== 'chat') return;
         if (!message.body) return;
 
-        // Ignora mensagens que contenham links (URLs)
+        // Ignora mensagens com links
         const body = message.body;
         if (body.includes('http://') || body.includes('https://')) {
             console.log('🔗 Link ignorado:', body);
@@ -170,7 +186,7 @@ function iniciarBot() {
         const info = await client.info;
         const isOwner = userId === info.wid._serialized;
 
-        // ===== COMANDOS DO DONO =====
+        // Comandos do dono
         if (isOwner) {
             const texto = normalizarTexto(body);
             if (texto === '!desligar' || texto === '!off') {
@@ -191,27 +207,22 @@ function iniciarBot() {
 
         const agora = Date.now();
         let estado = userState.get(userId) || { ultimaResposta: 0, etapa: null, dados: {}, aguardandoMenu: false };
-
         const textoOriginal = body;
         const texto = normalizarTexto(textoOriginal);
         console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
 
-        // ===== SE ESTIVER AGUARDANDO ESCOLHA DO MENU =====
+        // ===== FLUXO ATIVO (PIX ou RECADO) =====
         if (estado.aguardandoMenu) {
-            estado.aguardandoMenu = false; // limpa a flag
-
+            estado.aguardandoMenu = false;
             if (texto === '1') {
-                // Fluxo do Pix
                 await client.sendMessage(userId, 'Qual o valor que deseja enviar? (digite apenas números, ex: 25.50)');
                 estado.etapa = 'aguardando_valor_pix';
                 estado.dados = {};
             } else if (texto === '2') {
-                // Fluxo do recado
                 await client.sendMessage(userId, 'Qual seu nome?');
                 estado.etapa = 'aguardando_recado_nome';
                 estado.dados = {};
             } else {
-                // Opção inválida, repete o menu
                 const saudacao = getSaudacao();
                 const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem ou escolher uma dessas opções:\n\n` +
                              `1 - Fazer um Pix\n` +
@@ -223,13 +234,11 @@ function iniciarBot() {
                 userState.set(userId, estado);
                 return;
             }
-
             estado.ultimaResposta = agora;
             userState.set(userId, estado);
             return;
         }
 
-        // ===== SE ESTIVER EM ALGUM FLUXO (PIX ou RECADO) =====
         if (estado.etapa) {
             switch (estado.etapa) {
                 case 'aguardando_valor_pix':
@@ -304,7 +313,7 @@ function iniciarBot() {
             return;
         }
 
-        // ===== SE NÃO ESTÁ EM NENHUM FLUXO, OFERECE MENU =====
+        // ===== NENHUM FLUXO ATIVO: OFERECE MENU =====
         const saudacao = getSaudacao();
         const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem ou escolher uma dessas opções:\n\n` +
                      `1 - Fazer um Pix\n` +
@@ -314,7 +323,6 @@ function iniciarBot() {
         await client.sendMessage(userId, menu);
         console.log(`✅ Menu enviado para ${userId}`);
 
-        // Define que está aguardando a escolha do menu (ignora o silêncio)
         estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: true };
         userState.set(userId, estado);
     });

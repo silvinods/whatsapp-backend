@@ -4,6 +4,8 @@ const qrcode = require('qrcode');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -96,7 +98,7 @@ async function gerarPagamentoPix(valor, telefone) {
                 transaction_amount: valor,
                 description: 'Pix via WhatsApp',
                 payment_method_id: 'pix',
-                payer: { email: 'silpixvsoav@gmil.com' } // E-mail fixo do pagador
+                payer: { email: 'silpixvsoav@gmil.com' } // E-mail do pagador (seu ou fixo)
             }),
             signal: controller.signal
         });
@@ -140,6 +142,40 @@ app.get('/test-payment', async (req, res) => {
     }
 });
 
+// ========== ROTA DE RESET (limpar sessão) ==========
+app.get('/reset', async (req, res) => {
+    const key = req.query.key;
+    if (key !== '123') {
+        return res.status(403).send('Chave inválida');
+    }
+
+    try {
+        const authPath = path.join(__dirname, 'auth_info');
+        if (fs.existsSync(authPath)) {
+            fs.rmSync(authPath, { recursive: true, force: true });
+            console.log('🗑️ Pasta auth_info removida com sucesso');
+        }
+
+        if (client) {
+            await client.destroy();
+            client = null;
+        }
+
+        botReady = false;
+        currentQR = null;
+
+        setTimeout(() => {
+            console.log('🔄 Reiniciando bot após reset...');
+            iniciarBot();
+        }, 2000);
+
+        res.send('✅ Sessão resetada! O bot será reiniciado em alguns segundos. Escaneie o QR novamente em /qr');
+    } catch (err) {
+        console.error('Erro ao resetar sessão:', err);
+        res.status(500).send('Erro ao resetar sessão');
+    }
+});
+
 // ========== INICIALIZAÇÃO DO BOT ==========
 function iniciarBot() {
     client = new Client({
@@ -169,13 +205,13 @@ function iniciarBot() {
     });
 
     client.on('message', async (message) => {
-        // Filtros
+        // Filtros: apenas mensagens de texto, ignorar grupos e próprias mensagens
         if (message.from.includes('@g.us')) return;
         if (message.fromMe) return;
         if (message.type !== 'chat') return;
         if (!message.body) return;
 
-        // Ignora mensagens com links
+        // Ignora links
         const body = message.body;
         if (body.includes('http://') || body.includes('https://')) {
             console.log('🔗 Link ignorado:', body);

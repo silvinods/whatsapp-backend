@@ -129,7 +129,7 @@ async function gerarPagamentoPix(valor, telefone) {
     }
 }
 
-// ========== ROTA DE TESTE ==========
+// ========== ROTAS ==========
 app.get('/test-payment', async (req, res) => {
     if (!MP_ACCESS_TOKEN) {
         return res.status(400).json({ error: 'Token não configurado' });
@@ -142,7 +142,6 @@ app.get('/test-payment', async (req, res) => {
     }
 });
 
-// ========== ROTA DE RESET ==========
 app.get('/reset', async (req, res) => {
     const key = req.query.key;
     if (key !== '123') {
@@ -208,27 +207,18 @@ function iniciarBot() {
 
     client.on('message', async (message) => {
         // ===== FILTROS GLOBAIS =====
-        // Ignora grupos
-        if (message.from.includes('@g.us')) return;
-
-        // Ignora status (broadcast)
-        if (message.from === 'status@broadcast') {
+        if (message.from.includes('@g.us')) return;                // grupos
+        if (message.from === 'status@broadcast') {                 // status
             console.log('📅 Status ignorado (status@broadcast)');
             return;
         }
-
-        // Ignora mensagens enviadas pelo próprio bot
-        if (message.fromMe) return;
-
-        // Ignora qualquer mensagem que não seja de texto puro (fotos, vídeos, áudios, etc.)
-        if (message.type !== 'chat') {
+        if (message.fromMe) return;                                // mensagens do próprio bot
+        if (message.type !== 'chat') {                             // mídia, documentos, etc.
             console.log(`📎 Mídia ignorada (tipo: ${message.type})`);
             return;
         }
+        if (!message.body) return;                                 // vazias
 
-        if (!message.body) return;
-
-        // Ignora links
         const body = message.body;
         if (body.includes('http://') || body.includes('https://')) {
             console.log('🔗 Link ignorado:', body);
@@ -268,51 +258,23 @@ function iniciarBot() {
         if (!botAtivo) return;
 
         const agora = Date.now();
-        let estado = userState.get(userId) || { ultimaResposta: 0, ultimoMenu: 0, etapa: null, dados: {}, aguardandoMenu: false };
+        let estado = userState.get(userId) || {
+            ultimaResposta: 0,
+            ultimoMenu: 0,
+            etapa: null,
+            dados: {},
+            aguardandoMenu: false
+        };
         const textoOriginal = body;
         const texto = normalizarTexto(textoOriginal);
         console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
 
-        // ===== COOLDOWN DO MENU =====
-        // Se o menu foi enviado nos últimos 30 segundos e não há fluxo ativo, ignora a mensagem
-        if (!estado.etapa && !estado.aguardandoMenu && (agora - estado.ultimoMenu < 30000)) {
-            console.log(`⏳ Cooldown do menu (${Math.round((agora - estado.ultimoMenu)/1000)}s desde último menu) - ignorando`);
-            return;
-        }
+        // ===== VERIFICA SE É OPÇÃO VÁLIDA (1 ou 2) =====
+        const isOption = (texto === '1' || texto === '2');
 
-        // ===== FLUXO ATIVO (PIX ou RECADO) =====
-        if (estado.aguardandoMenu) {
-            estado.aguardandoMenu = false;
-            if (texto === '1') {
-                await client.sendMessage(userId, 'Qual o valor que deseja enviar? (digite apenas números, ex: 25.50)');
-                estado.etapa = 'aguardando_valor_pix';
-                estado.dados = {};
-            } else if (texto === '2') {
-                await client.sendMessage(userId, 'Qual seu nome?');
-                estado.etapa = 'aguardando_recado_nome';
-                estado.dados = {};
-            } else {
-                // Opção inválida: envia menu novamente
-                const saudacao = getSaudacao();
-                const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem ou escolher uma dessas opções:\n\n` +
-                             `1 - Fazer um Pix\n` +
-                             `2 - Deixar um recado\n\n` +
-                             `Digite o número da opção.`;
-                await client.sendMessage(userId, menu);
-                console.log(`✅ Menu reenviado para ${userId}`);
-                estado.aguardandoMenu = true;
-                estado.ultimoMenu = agora;
-                estado.ultimaResposta = agora;
-                userState.set(userId, estado);
-                return;
-            }
-            estado.ultimaResposta = agora;
-            userState.set(userId, estado);
-            return;
-        }
-
+        // ===== 1. SE JÁ ESTÁ EM UM FLUXO (PIX ou RECADO) =====
         if (estado.etapa) {
-            // Processa os fluxos (Pix ou recado) – igual ao código anterior
+            // Processa o fluxo normalmente
             switch (estado.etapa) {
                 case 'aguardando_valor_pix':
                     const valor = parseFloat(textoOriginal.replace(',', '.'));
@@ -329,7 +291,8 @@ function iniciarBot() {
                     } else {
                         await client.sendMessage(userId, '❌ Não foi possível gerar o Pix. Tente novamente mais tarde.');
                     }
-                    estado = { ultimaResposta: agora, ultimoMenu: 0, etapa: null, dados: {}, aguardandoMenu: false };
+                    // Após o fluxo, mantém o timestamp do último menu (para não reenviar menu imediatamente)
+                    estado = { ...estado, ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
                     break;
 
                 case 'aguardando_recado_nome':
@@ -370,23 +333,74 @@ function iniciarBot() {
                             console.error('Erro ao salvar recado:', err);
                             await client.sendMessage(userId, '❌ Erro ao salvar recado. Tente novamente.');
                         }
-                        estado = { ultimaResposta: agora, ultimoMenu: 0, etapa: null, dados: {}, aguardandoMenu: false };
+                        estado = { ...estado, ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
                     } else if (texto === 'não') {
                         await client.sendMessage(userId, 'OK, vamos recomeçar. Qual seu nome?');
-                        estado = { ultimaResposta: agora, ultimoMenu: 0, etapa: 'aguardando_recado_nome', dados: {}, aguardandoMenu: false };
+                        estado = { ...estado, ultimaResposta: agora, etapa: 'aguardando_recado_nome', dados: {}, aguardandoMenu: false };
                     } else {
                         await client.sendMessage(userId, 'Por favor, responda *sim* para confirmar ou *não* para recomeçar.');
                     }
                     break;
 
                 default:
-                    estado = { ultimaResposta: agora, ultimoMenu: 0, etapa: null, dados: {}, aguardandoMenu: false };
+                    estado = { ...estado, ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
             }
             userState.set(userId, estado);
             return;
         }
 
-        // ===== NENHUM FLUXO ATIVO: OFERECE MENU =====
+        // ===== 2. SE ESTÁ AGUARDANDO ESCOLHA DO MENU =====
+        if (estado.aguardandoMenu) {
+            if (isOption) {
+                // Opção válida: inicia o fluxo correspondente
+                estado.aguardandoMenu = false;
+                if (texto === '1') {
+                    await client.sendMessage(userId, 'Qual o valor que deseja enviar? (digite apenas números, ex: 25.50)');
+                    estado.etapa = 'aguardando_valor_pix';
+                    estado.dados = {};
+                } else if (texto === '2') {
+                    await client.sendMessage(userId, 'Qual seu nome?');
+                    estado.etapa = 'aguardando_recado_nome';
+                    estado.dados = {};
+                }
+                estado.ultimaResposta = agora;
+                userState.set(userId, estado);
+            } else {
+                // Opção inválida: apenas ignora (não envia mensagem)
+                console.log(`Opção inválida durante aguardandoMenu: ${texto} (ignorado)`);
+            }
+            return;
+        }
+
+        // ===== 3. NENHUM FLUXO ATIVO =====
+        // Verifica cooldown do menu (30 segundos)
+        const cooldownActive = (agora - estado.ultimoMenu < 30000);
+
+        // Se a mensagem é uma opção (1 ou 2), ignora o cooldown e vai direto para o fluxo
+        if (isOption) {
+            console.log(`Opção direta (${texto}) ignorando cooldown.`);
+            if (texto === '1') {
+                await client.sendMessage(userId, 'Qual o valor que deseja enviar? (digite apenas números, ex: 25.50)');
+                estado.etapa = 'aguardando_valor_pix';
+                estado.dados = {};
+            } else if (texto === '2') {
+                await client.sendMessage(userId, 'Qual seu nome?');
+                estado.etapa = 'aguardando_recado_nome';
+                estado.dados = {};
+            }
+            estado.ultimaResposta = agora;
+            // Não alteramos `ultimoMenu` para não resetar o cooldown
+            userState.set(userId, estado);
+            return;
+        }
+
+        // Se não é opção e cooldown está ativo, ignora a mensagem
+        if (cooldownActive) {
+            console.log(`⏳ Cooldown do menu ativo (${Math.round((agora - estado.ultimoMenu)/1000)}s) - ignorando`);
+            return;
+        }
+
+        // Se não é opção e cooldown expirou, envia o menu
         const saudacao = getSaudacao();
         const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem ou escolher uma dessas opções:\n\n` +
                      `1 - Fazer um Pix\n` +
@@ -396,7 +410,14 @@ function iniciarBot() {
         await client.sendMessage(userId, menu);
         console.log(`✅ Menu enviado para ${userId}`);
 
-        estado = { ultimaResposta: agora, ultimoMenu: agora, etapa: null, dados: {}, aguardandoMenu: true };
+        estado = {
+            ...estado,
+            ultimaResposta: agora,
+            ultimoMenu: agora,
+            etapa: null,
+            dados: {},
+            aguardandoMenu: true
+        };
         userState.set(userId, estado);
     });
 

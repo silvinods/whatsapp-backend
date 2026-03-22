@@ -43,7 +43,8 @@ let client = null;
 let currentQR = null;
 let botReady = false;
 let botAtivo = true;
-const userState = new Map();
+const userState = new Map(); // { ultimaResposta, ultimoMenu, etapa, dados, aguardandoMenu }
+let botStartTime = Date.now();
 
 // ========== FUNÇÕES AUXILIARES ==========
 function normalizarTexto(texto) {
@@ -55,7 +56,6 @@ function normalizarTexto(texto) {
 }
 
 function getSaudacao() {
-    // Horário de Brasília (UTC-3)
     const now = new Date();
     const brasilia = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
     const hora = brasilia.getHours();
@@ -98,7 +98,7 @@ async function gerarPagamentoPix(valor, telefone) {
                 transaction_amount: valor,
                 description: 'Pix via WhatsApp',
                 payment_method_id: 'pix',
-                payer: { email: 'silpixvsoav@gmil.com' } // E-mail do pagador (seu ou fixo)
+                payer: { email: 'silpixvsoav@gmil.com' }
             }),
             signal: controller.signal
         });
@@ -129,7 +129,7 @@ async function gerarPagamentoPix(valor, telefone) {
     }
 }
 
-// ========== ROTA DE TESTE (opcional) ==========
+// ========== ROTA DE TESTE ==========
 app.get('/test-payment', async (req, res) => {
     if (!MP_ACCESS_TOKEN) {
         return res.status(400).json({ error: 'Token não configurado' });
@@ -142,7 +142,7 @@ app.get('/test-payment', async (req, res) => {
     }
 });
 
-// ========== ROTA DE RESET (limpar sessão) ==========
+// ========== ROTA DE RESET ==========
 app.get('/reset', async (req, res) => {
     const key = req.query.key;
     if (key !== '123') {
@@ -178,6 +178,8 @@ app.get('/reset', async (req, res) => {
 
 // ========== INICIALIZAÇÃO DO BOT ==========
 function iniciarBot() {
+    botStartTime = Date.now();
+
     client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: {
@@ -205,10 +207,25 @@ function iniciarBot() {
     });
 
     client.on('message', async (message) => {
-        // Filtros: apenas mensagens de texto, ignorar grupos e próprias mensagens
+        // ===== FILTROS GLOBAIS =====
+        // Ignora grupos
         if (message.from.includes('@g.us')) return;
+
+        // Ignora status (broadcast)
+        if (message.from === 'status@broadcast') {
+            console.log('📅 Status ignorado (status@broadcast)');
+            return;
+        }
+
+        // Ignora mensagens enviadas pelo próprio bot
         if (message.fromMe) return;
-        if (message.type !== 'chat') return;
+
+        // Ignora qualquer mensagem que não seja de texto puro (fotos, vídeos, áudios, etc.)
+        if (message.type !== 'chat') {
+            console.log(`📎 Mídia ignorada (tipo: ${message.type})`);
+            return;
+        }
+
         if (!message.body) return;
 
         // Ignora links
@@ -218,11 +235,20 @@ function iniciarBot() {
             return;
         }
 
+        // Ignora mensagens muito antigas (histórico)
+        if (message.timestamp) {
+            const messageTimeMs = message.timestamp * 1000;
+            if (messageTimeMs < botStartTime - 5000) {
+                console.log(`⏳ Mensagem antiga ignorada (${new Date(messageTimeMs).toISOString()})`);
+                return;
+            }
+        }
+
         const userId = message.from;
         const info = await client.info;
         const isOwner = userId === info.wid._serialized;
 
-        // Comandos do dono
+        // ===== COMANDOS DO DONO =====
         if (isOwner) {
             const texto = normalizarTexto(body);
             if (texto === '!desligar' || texto === '!off') {
@@ -242,10 +268,17 @@ function iniciarBot() {
         if (!botAtivo) return;
 
         const agora = Date.now();
-        let estado = userState.get(userId) || { ultimaResposta: 0, etapa: null, dados: {}, aguardandoMenu: false };
+        let estado = userState.get(userId) || { ultimaResposta: 0, ultimoMenu: 0, etapa: null, dados: {}, aguardandoMenu: false };
         const textoOriginal = body;
         const texto = normalizarTexto(textoOriginal);
         console.log(`📩 Mensagem de ${userId}: "${textoOriginal}"`);
+
+        // ===== COOLDOWN DO MENU =====
+        // Se o menu foi enviado nos últimos 30 segundos e não há fluxo ativo, ignora a mensagem
+        if (!estado.etapa && !estado.aguardandoMenu && (agora - estado.ultimoMenu < 30000)) {
+            console.log(`⏳ Cooldown do menu (${Math.round((agora - estado.ultimoMenu)/1000)}s desde último menu) - ignorando`);
+            return;
+        }
 
         // ===== FLUXO ATIVO (PIX ou RECADO) =====
         if (estado.aguardandoMenu) {
@@ -259,13 +292,16 @@ function iniciarBot() {
                 estado.etapa = 'aguardando_recado_nome';
                 estado.dados = {};
             } else {
+                // Opção inválida: envia menu novamente
                 const saudacao = getSaudacao();
                 const menu = `${saudacao}! O Silvino não está no momento, mas pode deixar sua mensagem ou escolher uma dessas opções:\n\n` +
                              `1 - Fazer um Pix\n` +
                              `2 - Deixar um recado\n\n` +
                              `Digite o número da opção.`;
                 await client.sendMessage(userId, menu);
+                console.log(`✅ Menu reenviado para ${userId}`);
                 estado.aguardandoMenu = true;
+                estado.ultimoMenu = agora;
                 estado.ultimaResposta = agora;
                 userState.set(userId, estado);
                 return;
@@ -276,6 +312,7 @@ function iniciarBot() {
         }
 
         if (estado.etapa) {
+            // Processa os fluxos (Pix ou recado) – igual ao código anterior
             switch (estado.etapa) {
                 case 'aguardando_valor_pix':
                     const valor = parseFloat(textoOriginal.replace(',', '.'));
@@ -292,7 +329,7 @@ function iniciarBot() {
                     } else {
                         await client.sendMessage(userId, '❌ Não foi possível gerar o Pix. Tente novamente mais tarde.');
                     }
-                    estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
+                    estado = { ultimaResposta: agora, ultimoMenu: 0, etapa: null, dados: {}, aguardandoMenu: false };
                     break;
 
                 case 'aguardando_recado_nome':
@@ -333,17 +370,17 @@ function iniciarBot() {
                             console.error('Erro ao salvar recado:', err);
                             await client.sendMessage(userId, '❌ Erro ao salvar recado. Tente novamente.');
                         }
-                        estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
+                        estado = { ultimaResposta: agora, ultimoMenu: 0, etapa: null, dados: {}, aguardandoMenu: false };
                     } else if (texto === 'não') {
                         await client.sendMessage(userId, 'OK, vamos recomeçar. Qual seu nome?');
-                        estado = { ultimaResposta: agora, etapa: 'aguardando_recado_nome', dados: {}, aguardandoMenu: false };
+                        estado = { ultimaResposta: agora, ultimoMenu: 0, etapa: 'aguardando_recado_nome', dados: {}, aguardandoMenu: false };
                     } else {
                         await client.sendMessage(userId, 'Por favor, responda *sim* para confirmar ou *não* para recomeçar.');
                     }
                     break;
 
                 default:
-                    estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: false };
+                    estado = { ultimaResposta: agora, ultimoMenu: 0, etapa: null, dados: {}, aguardandoMenu: false };
             }
             userState.set(userId, estado);
             return;
@@ -359,7 +396,7 @@ function iniciarBot() {
         await client.sendMessage(userId, menu);
         console.log(`✅ Menu enviado para ${userId}`);
 
-        estado = { ultimaResposta: agora, etapa: null, dados: {}, aguardandoMenu: true };
+        estado = { ultimaResposta: agora, ultimoMenu: agora, etapa: null, dados: {}, aguardandoMenu: true };
         userState.set(userId, estado);
     });
 

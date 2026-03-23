@@ -380,7 +380,7 @@ function iniciarBot() {
         if (isOption) {
             console.log(`Opção direta (${texto}) ignorando cooldown.`);
             if (texto === '1') {
-                await client.sendMessage(userId, 'Qual o valor que deseja enviar? (digite apenas números, ex: 25.50)');
+                await client.sendMessage(userId, 'Qual o valor que deseja enviar?');
                 estado.etapa = 'aguardando_valor_pix';
                 estado.dados = {};
             } else if (texto === '2') {
@@ -389,6 +389,7 @@ function iniciarBot() {
                 estado.dados = {};
             }
             estado.ultimaResposta = agora;
+            //testado com sucesso
             // Não alteramos `ultimoMenu` para não resetar o cooldown
             userState.set(userId, estado);
             return;

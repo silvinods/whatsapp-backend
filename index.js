@@ -355,7 +355,7 @@ function iniciarBot() {
                 // Opção válida: inicia o fluxo correspondente
                 estado.aguardandoMenu = false;
                 if (texto === '1') {
-                    await client.sendMessage(userId, 'Qual o valor que deseja enviar? (digite apenas números, ex: 25.50)');
+                    await client.sendMessage(userId, 'Qual o valor que deseja enviar?');
                     estado.etapa = 'aguardando_valor_pix';
                     estado.dados = {};
                 } else if (texto === '2') {
@@ -424,7 +424,7 @@ function iniciarBot() {
 
     client.initialize();
 }
-
+//Onde vai as rotas das API
 // ========== ROTAS DA API ==========
 app.get('/status', async (req, res) => {
     const numeroBot = botReady ? (await client.info).wid._serialized : null;
